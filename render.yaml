@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: aliyun-iot-web-console
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm run start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        sync: false
+      - key: ALIYUN_PRODUCT_KEY
+        sync: false
+      - key: ALIYUN_DEVICE_NAME
+        sync: false
+      - key: ALIYUN_DEVICE_SECRET
+        sync: false
+      - key: ALIYUN_REGION_ID
+        sync: false
+      - key: ALIYUN_CLIENT_ID
+        sync: false
+      - key: ALIYUN_ACCESS_KEY_ID
+        sync: false
+      - key: ALIYUN_ACCESS_KEY_SECRET
+        sync: false
+      - key: ALIYUN_IOT_INSTANCE_ID
+        sync: false
+      - key: ENABLE_LOCAL_MQTT
+        value: "false"
+      - key: ALLOW_CLOUD_ROUTE_MQTT_FALLBACK
+        value: "false"
+      - key: TARGET_ONLINE_WAIT_MS
+        value: "15000"
+      - key: TARGET_ONLINE_POLL_MS
+        value: "1500"
+      - key: STRICT_TARGET_ONLINE_CHECK
+        value: "false"
+      - key: CLOUD_DISPATCH_RETRY_ATTEMPTS
+        value: "3"
+      - key: CLOUD_DISPATCH_RETRY_INTERVAL_MS
+        value: "2000"
+      - key: PROPERTY_POLL_ON_CONNECT
+        value: "true"
+      - key: PROPERTY_POLL_INTERVAL_MS
+        value: "2000"
+      - key: AUTO_CONNECT_ON_START
+        value: "true"

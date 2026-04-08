@@ -1,0 +1,272 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IoT 展示台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar card">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+              <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5z"></path>
+              <path d="M8 9.5h8M8 14.5h5"></path>
+            </svg>
+          </div>
+          <div>
+            <h1>IoT 展示台</h1>
+            <p id="envModeHint" class="device-line"></p>
+          </div>
+        </div>
+
+        <div class="top-actions">
+          <div id="statusPill" class="status-pill status-offline">离线</div>
+          <button id="connectWithEnvBtn" class="btn btn-primary" type="button">连接</button>
+          <button id="disconnectBtn" class="btn btn-ghost" type="button">断开</button>
+        </div>
+      </header>
+
+      <section class="stats-row">
+        <article class="stat-card card">
+          <div class="card-label">
+            <span class="label-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M3.75 1.5a.75.75 0 0 1 .75.75v1.5h7V2.25a.75.75 0 0 1 1.5 0v1.5h.25A1.75 1.75 0 0 1 16 5.5v7A1.75 1.75 0 0 1 14.25 14.25h-12.5A1.75 1.75 0 0 1 0 12.5v-7A1.75 1.75 0 0 1 1.75 3.75H2v-1.5a.75.75 0 0 1 .75-.75zm10.5 5h-12.5v6a.25.25 0 0 0 .25.25h12a.25.25 0 0 0 .25-.25z"></path></svg>
+            </span>
+            <span>连接状态</span>
+          </div>
+          <strong id="connectionValue">--</strong>
+        </article>
+
+        <article class="stat-card card">
+          <div class="card-label">
+            <span class="label-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 2A1.75 1.75 0 0 0 0 3.75v8.5C0 13.216.784 14 1.75 14h12.5A1.75 1.75 0 0 0 16 12.25v-8.5A1.75 1.75 0 0 0 14.25 2zM1.5 3.75a.25.25 0 0 1 .25-.25h12.5a.25.25 0 0 1 .25.25v1.69l-6.5 3.25-6.5-3.25zm0 3.368 5.835 2.917a1.5 1.5 0 0 0 1.33 0L14.5 7.118v5.132a.25.25 0 0 1-.25.25H1.75a.25.25 0 0 1-.25-.25z"></path></svg>
+            </span>
+            <span>物模型项</span>
+          </div>
+          <strong id="modelCountValue">0</strong>
+        </article>
+
+        <article class="stat-card card">
+          <div class="card-label">
+            <span class="label-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.25a.75.75 0 0 1 .75.75v5.25H14a.75.75 0 0 1 0 1.5H8.75V14a.75.75 0 0 1-1.5 0V8.75H2a.75.75 0 0 1 0-1.5h5.25V2A.75.75 0 0 1 8 1.25z"></path></svg>
+            </span>
+            <span>状态项</span>
+          </div>
+          <strong id="stateCountValue">0</strong>
+        </article>
+      </section>
+
+      <section class="mini-grid">
+        <article class="mini-card card">
+          <div class="mini-head">
+            <div class="card-label">
+              <span class="label-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 3a.75.75 0 0 1 .75.75v8.5h10.75a.75.75 0 0 1 0 1.5H1.75A1.75 1.75 0 0 1 0 12V3.75A.75.75 0 0 1 .75 3zm12.03 1.22a.75.75 0 0 1 0 1.06L9.81 9.25a.75.75 0 0 1-1.06 0L6.5 7 4.28 9.22a.75.75 0 1 1-1.06-1.06L5.97 5.4a.75.75 0 0 1 1.06 0l2.25 2.25 3.44-3.43a.75.75 0 0 1 1.06 0z"></path></svg>
+              </span>
+              <span>湿度趋势</span>
+            </div>
+            <strong id="miniSoilValue">--</strong>
+          </div>
+          <canvas id="miniSoilCanvas" class="mini-canvas" aria-label="soil trend"></canvas>
+        </article>
+
+        <article class="mini-card card">
+          <div class="mini-head">
+            <div class="card-label">
+              <span class="label-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 1.75A1.75 1.75 0 0 0 .75 3.5v9A1.75 1.75 0 0 0 2.5 14.25h11A1.75 1.75 0 0 0 15.25 12.5v-9A1.75 1.75 0 0 0 13.5 1.75zm0 1.5h11a.25.25 0 0 1 .25.25V6H2.25V3.5a.25.25 0 0 1 .25-.25zm-.25 4.25h11.5v5a.25.25 0 0 1-.25.25h-11a.25.25 0 0 1-.25-.25zm2 1.25a.75.75 0 1 0 0 1.5h2.5a.75.75 0 1 0 0-1.5zm4.5 0a.75.75 0 1 0 0 1.5h3a.75.75 0 1 0 0-1.5z"></path></svg>
+              </span>
+              <span>状态趋势</span>
+            </div>
+            <strong id="miniStateValue">--</strong>
+          </div>
+          <canvas id="miniStateCanvas" class="mini-canvas" aria-label="state trend"></canvas>
+        </article>
+
+        <article class="mini-card card">
+          <div class="mini-head">
+            <div class="card-label">
+              <span class="label-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 2h12.5A1.75 1.75 0 0 1 16 3.75v8.5A1.75 1.75 0 0 1 14.25 14H1.75A1.75 1.75 0 0 1 0 12.25v-8.5A1.75 1.75 0 0 1 1.75 2zm.25 1.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-8.5a.25.25 0 0 0-.25-.25zm3.78 1.72a.75.75 0 0 1 1.06 0L9.62 8 6.84 10.78a.75.75 0 1 1-1.06-1.06L7.5 8 5.78 6.28a.75.75 0 0 1 0-1.06zm4.97.03a.75.75 0 0 1 1 .34l1.5 3a.75.75 0 1 1-1.34.66l-.14-.28h-2.06l-.14.28a.75.75 0 0 1-1.34-.66l1.5-3a.75.75 0 0 1 1.02-.34zm-.31 2.34h.56L10.72 7z"></path></svg>
+              </span>
+              <span>发布次数</span>
+            </div>
+            <strong id="miniPublishValue">0</strong>
+          </div>
+          <canvas id="miniPublishCanvas" class="mini-canvas" aria-label="publish trend"></canvas>
+        </article>
+      </section>
+
+      <section class="main-grid">
+        <article class="panel card chart-panel">
+          <div class="panel-head">
+            <h2 class="panel-title">
+              <span class="title-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.75 1.5a.75.75 0 0 0-1.5 0v1.884a4.75 4.75 0 1 0 4.066 4.066h1.884a.75.75 0 0 0 0-1.5h-1.884A4.75 4.75 0 0 0 8.75 3.384zM8 4.75a3.25 3.25 0 1 1 0 6.5 3.25 3.25 0 0 1 0-6.5z"></path></svg>
+              </span>
+              <span>土壤湿度</span>
+            </h2>
+            <button id="refreshStateBtn" class="btn btn-soft" type="button">刷新</button>
+          </div>
+
+          <div class="chart-frame">
+            <canvas id="soilChartCanvas"></canvas>
+            <div id="soilChartEmpty" class="chart-empty">暂无数据</div>
+          </div>
+
+          <div class="soil-kpis">
+            <div class="kpi-item">
+              <span>当前</span>
+              <strong id="soilCurrentValue">--</strong>
+            </div>
+            <div class="kpi-item">
+              <span>最小</span>
+              <strong id="soilMinValue">--</strong>
+            </div>
+            <div class="kpi-item">
+              <span>最大</span>
+              <strong id="soilMaxValue">--</strong>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel card property-panel">
+          <div class="panel-head">
+            <h2 class="panel-title">
+              <span class="title-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.25 1.5a.75.75 0 0 1 1.5 0v5h5a.75.75 0 0 1 0 1.5h-5v5a.75.75 0 0 1-1.5 0v-5h-5a.75.75 0 0 1 0-1.5h5z"></path></svg>
+              </span>
+              <span>设备状态</span>
+            </h2>
+          </div>
+          <div id="propertyStateMeta" class="meta-line"></div>
+          <div id="propertyVisualGrid" class="property-grid"></div>
+        </article>
+      </section>
+
+      <section class="ops-accordion card">
+        <div class="ops-head">
+          <h2 class="panel-title">
+            <span class="title-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a2 2 0 0 1 2 2v1.09A4.002 4.002 0 0 1 12 7.5v1A4.5 4.5 0 1 1 3 8.5v-1a4.002 4.002 0 0 1 2-3.41V3a2 2 0 0 1 2-2zm0 1.5a.5.5 0 0 0-.5.5v.55c.164-.03.33-.05.5-.05s.336.02.5.05V3a.5.5 0 0 0-.5-.5zm0 2.5A2.5 2.5 0 0 0 5.5 7.5v1a3 3 0 1 0 6 0v-1A2.5 2.5 0 0 0 8 5z"></path></svg>
+            </span>
+            <span>操作面板</span>
+          </h2>
+        </div>
+
+        <details class="accordion-item" id="commandSection">
+          <summary>
+            <span class="summary-left">
+              <span class="title-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M9.78 2.72a.75.75 0 0 1 1.06 0l4 4a.75.75 0 0 1 0 1.06l-4 4a.75.75 0 1 1-1.06-1.06L12.72 7.78H2.75a.75.75 0 0 1 0-1.5h9.97L9.78 3.78a.75.75 0 0 1 0-1.06z"></path></svg>
+              </span>
+              <span>命令下发</span>
+            </span>
+          </summary>
+
+          <div class="accordion-body">
+            <form id="publishForm" class="publish-form">
+              <div class="quick-row">
+                <select id="quickProperty">
+                  <option value="">选择属性</option>
+                </select>
+                <input id="quickValue" placeholder="值" />
+                <button id="applyPropertyBtn" class="btn btn-soft" type="button">写入</button>
+              </div>
+
+              <div class="quick-actions">
+                <button class="btn btn-primary" type="submit">发布</button>
+              </div>
+
+              <details class="inline-advanced">
+                <summary>高级设置</summary>
+                <div class="advanced-grid">
+                  <input id="publishTopic" name="topic" placeholder="/sys/{pk}/{dn}/thing/service/property/set" />
+                  <textarea
+                    id="publishPayload"
+                    name="payload"
+                    rows="7"
+                    placeholder='{"id":"1","version":"1.0","params":{"Light_Status":1},"method":"thing.service.property.set"}'
+                  ></textarea>
+                  <div class="publish-actions">
+                    <select id="publishQos" name="qos">
+                      <option value="0">QoS 0</option>
+                      <option value="1">QoS 1</option>
+                    </select>
+                    <label class="retain-line">
+                      <input id="publishRetain" name="retain" type="checkbox" />
+                      Retain
+                    </label>
+                  </div>
+                </div>
+              </details>
+            </form>
+          </div>
+        </details>
+
+        <details class="accordion-item" id="modelSection">
+          <summary>
+            <span class="summary-left">
+              <span class="title-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 2A1.75 1.75 0 0 0 0 3.75v8.5C0 13.216.784 14 1.75 14h12.5A1.75 1.75 0 0 0 16 12.25v-8.5A1.75 1.75 0 0 0 14.25 2zm0 1.5h12.5a.25.25 0 0 1 .25.25v1.5h-13v-1.5a.25.25 0 0 1 .25-.25zm-.25 3.25h13v5.5a.25.25 0 0 1-.25.25H1.75a.25.25 0 0 1-.25-.25z"></path></svg>
+              </span>
+              <span>物模型</span>
+            </span>
+          </summary>
+
+          <div class="accordion-body">
+            <div class="panel-head compact-head">
+              <div id="modelMeta" class="meta-line"></div>
+              <button id="refreshModelBtn" class="btn btn-soft" type="button">同步模型</button>
+            </div>
+            <div id="modelPropertyList" class="model-grid"></div>
+          </div>
+        </details>
+
+        <details class="accordion-item" id="debugSection">
+          <summary>
+            <span class="summary-left">
+              <span class="title-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.5 1.5a.5.5 0 0 0-1 0v1.086A4.502 4.502 0 0 0 4 7v2.5A2.5 2.5 0 0 0 6.5 12h3A2.5 2.5 0 0 0 12 9.5V7a4.502 4.502 0 0 0-3.5-4.414zM5.5 7a3 3 0 1 1 6 0v2.5a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1zm1.75 6a.75.75 0 0 1 .75.75v.25h.5v-.25a.75.75 0 0 1 1.5 0v.5A1.75 1.75 0 0 1 8.25 16h-.5A1.75 1.75 0 0 1 6 14.25v-.5a.75.75 0 0 1 .75-.75z"></path></svg>
+              </span>
+              <span>调试</span>
+            </span>
+          </summary>
+
+          <div class="accordion-body">
+            <div id="debugModeHint" class="meta-line"></div>
+
+            <section id="subscriptionPanel" class="debug-block">
+              <form id="subForm" class="sub-row">
+                <input id="subTopic" name="topic" placeholder="完整 Topic 或 user/xxx" />
+                <select id="subQos" name="qos">
+                  <option value="0">QoS 0</option>
+                  <option value="1">QoS 1</option>
+                </select>
+                <button class="btn btn-soft" type="submit">订阅</button>
+                <button id="unsubBtn" class="btn btn-soft" type="button">取消</button>
+              </form>
+              <ul id="subList" class="chip-list"></ul>
+            </section>
+
+            <section class="debug-block">
+              <div id="messageList" class="console"></div>
+            </section>
+
+            <section class="debug-block">
+              <div id="logList" class="console"></div>
+            </section>
+          </div>
+        </details>
+      </section>
+    </main>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

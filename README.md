@@ -152,28 +152,3 @@ npm run start
 
 4. 其他 Topic
 - 使用 MQTT raw publish
-
-## 本次关键改动
-
-- 发布前自动标准化 Topic 输入：
-  - `sys/...` 自动补 `/`
-  - `user/...` 自动补成 `/{pk}/{dn}/user/...`
-- `property/set` 与 `service` payload 自动补齐 `id/version/method/params`
-- 默认订阅增加回复 Topic（例如 `property/set_reply`），便于观察设备应答
-- 根据设备 callback 约束重写下发：
-  - 仅允许 callback 可处理的属性键：`identify_check`、`Light_Status`、`Door_Status`
-  - 对物模型只读属性直接拦截，避免无效下发
-  - 按物模型类型自动转换（如 `bool` -> `0/1`）
-
-## 常见问题
-
-1. 连接在线但设备无响应
-- 检查发布路由是否为 `set_device_property` / `invoke_thing_service`
-- 检查 payload 中 `params` 键名是否为物模型 `identifier`
-- 检查设备端是否订阅/处理对应系统 Topic
-- 注意：同一设备三要素通常只允许一个 MQTT 会话。若本控制台以相同三要素连接，可能会挤掉真实设备连接。
-  - 现已实现：系统命令下发前会自动释放本地同设备 MQTT 会话，并轮询等待设备回线后再下发。
-
-2. 物模型刷新失败
-- `iot.Sre.IotInstanceNotFound`：`ALIYUN_IOT_INSTANCE_ID` 与地域不匹配
-- `iot.prod.NotExistedProduct`：AK/SK 无该产品权限，或地域/实例不匹配

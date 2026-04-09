@@ -577,8 +577,63 @@ body {
 
 .quick-row {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) minmax(120px, 1fr) auto;
+  grid-template-columns: minmax(180px, 1fr) auto;
   gap: 8px;
+}
+
+.command-hint {
+  font-size: 0.8rem;
+}
+
+.command-param-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.command-param-empty {
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  background: #fbfcfd;
+}
+
+.command-param-item {
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 8px 9px;
+  background: #fcfdfe;
+  display: grid;
+  gap: 6px;
+}
+
+.command-param-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.command-param-name {
+  font-weight: 600;
+  font-size: 0.84rem;
+  color: #2f3a45;
+}
+
+.command-param-type {
+  font-size: 0.72rem;
+  color: #6c7683;
+}
+
+.command-param-required {
+  font-size: 0.72rem;
+  color: #b54708;
+}
+
+.command-param-desc {
+  font-size: 0.76rem;
+  color: #7a8592;
 }
 
 .quick-actions {

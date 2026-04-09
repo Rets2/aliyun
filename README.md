@@ -4,7 +4,7 @@
 
 当前实现只走以下华为云接口：
 - `CreateCommand`：下发设备命令
-- `ShowProduct`：同步产品物模型属性
+- `ShowProduct`：同步产品物模型（属性 + 命令定义）
 - `ShowDeviceShadow`：读取设备影子上报状态
 - `ShowDevice`：查询设备在线状态
 
@@ -44,15 +44,17 @@ npm run start
 - `PROPERTY_POLL_INTERVAL_MS`
 - `AUTO_CONNECT_ON_START`
 
-## 3. 命令格式
+## 3. 命令同步与格式
 
-支持命令：
-- `turn_light`（参数：`paras.Light_Status`）
-- `turn_relay`（参数：`paras.Relay_Status`）
-- `blink_light`（参数：`paras.blink_count/on_ms/off_ms`）
-- `blink_relay`（参数：`paras.blink_count/on_ms/off_ms`）
+命令不再硬编码，页面和后端都会从 `ShowProduct` 同步 `service_capabilities[].commands`。
 
-示例：
+发布校验为严格模式：
+- `command_name` 必须在云端已同步命令中
+- `paras` 必须是对象
+- 必填参数不能缺失
+- 未定义参数会被拒绝
+
+命令请求格式示例：
 
 ```json
 {
@@ -60,18 +62,6 @@ npm run start
   "command_name": "turn_light",
   "paras": {
     "Light_Status": 1
-  }
-}
-```
-
-```json
-{
-  "service_id": "Rets2",
-  "command_name": "blink_light",
-  "paras": {
-    "blink_count": 3,
-    "on_ms": 200,
-    "off_ms": 200
   }
 }
 ```
@@ -89,11 +79,13 @@ npm run start
 
 说明：
 - `POST /api/subscribe` 与 `POST /api/unsubscribe` 在华为命令通道中固定返回禁用提示。
+- `GET /api/model/properties` 返回 `properties` 与 `commands` 两类模型数据。
+- 本项目当前不包含“规则引擎规则”可视化/管理（规则层为下一阶段）。
 
 ## 5. Socket 事件
 
 - `status`
-- `thing_model`
+- `thing_model`（包含 `properties` 与 `commands`）
 - `property_state`
 - `published`
 - `log`

@@ -184,18 +184,15 @@
             <form id="publishForm" class="publish-form">
               <div class="quick-row">
                 <select id="quickProperty">
-                  <option value="">选择命令</option>
-                  <option value="turn_light">turn_light (Light_Status)</option>
-                  <option value="turn_relay">turn_relay (Relay_Status)</option>
-                  <option value="blink_light">blink_light (blink_count/on_ms/off_ms)</option>
-                  <option value="blink_relay">blink_relay (blink_count/on_ms/off_ms)</option>
+                  <option value="">请先同步模型</option>
                 </select>
-                <input id="quickValue" placeholder='0/1 或 {"blink_count":3,"on_ms":200,"off_ms":200}' />
                 <button id="applyPropertyBtn" class="btn btn-soft" type="button">填充</button>
               </div>
+              <div id="quickCommandHint" class="meta-line command-hint">未同步到可用命令，请先连接并同步模型。</div>
+              <div id="quickParamForm" class="command-param-grid"></div>
 
               <div class="quick-actions">
-                <button class="btn btn-primary" type="submit">发布</button>
+                <button id="publishBtn" class="btn btn-primary" type="submit">发布</button>
               </div>
 
               <details class="inline-advanced">

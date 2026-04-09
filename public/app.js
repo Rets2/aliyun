@@ -7,7 +7,8 @@ const modelPropertyList = document.getElementById("modelPropertyList");
 const propertyStateMeta = document.getElementById("propertyStateMeta");
 const propertyVisualGrid = document.getElementById("propertyVisualGrid");
 const quickPropertyInput = document.getElementById("quickProperty");
-const quickValueInput = document.getElementById("quickValue");
+const quickCommandHint = document.getElementById("quickCommandHint");
+const quickParamForm = document.getElementById("quickParamForm");
 const publishTopicInput = document.getElementById("publishTopic");
 const publishPayloadInput = document.getElementById("publishPayload");
 const publishQosInput = document.getElementById("publishQos");
@@ -43,11 +44,13 @@ const refreshModelBtn = document.getElementById("refreshModelBtn");
 const refreshStateBtn = document.getElementById("refreshStateBtn");
 const applyPropertyBtn = document.getElementById("applyPropertyBtn");
 const publishForm = document.getElementById("publishForm");
+const publishBtn = document.getElementById("publishBtn");
 const subForm = document.getElementById("subForm");
 const unsubBtn = document.getElementById("unsubBtn");
 
 let currentConfig = null;
 let thingModelProperties = [];
+let thingModelCommands = [];
 let currentPropertyState = [];
 let resolvedSoilIdentifier = "";
 let resolvedAirTempIdentifier = "";
@@ -113,25 +116,6 @@ function parseJsonText(value) {
   }
 }
 
-function parseSmartValue(rawInput) {
-  const raw = String(rawInput || "").trim();
-  if (!raw) return "";
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  if (raw === "null") return null;
-  if (!Number.isNaN(Number(raw))) return Number(raw);
-
-  if ((raw.startsWith("{") && raw.endsWith("}")) || (raw.startsWith("[") && raw.endsWith("]"))) {
-    try {
-      return JSON.parse(raw);
-    } catch (_error) {
-      return raw;
-    }
-  }
-
-  return raw;
-}
-
 async function api(path, options = {}) {
   const response = await fetch(path, {
     method: "GET",
@@ -166,38 +150,290 @@ function fillDefaultTopic() {
   }
 }
 
+function normalizeCommandParamType(rawType) {
+  const type = String(rawType || "").trim().toLowerCase();
+  if (["int", "long", "float", "double", "number", "decimal"].includes(type)) return "number";
+  if (["bool", "boolean"].includes(type)) return "bool";
+  if (["struct", "object", "json"].includes(type)) return "struct";
+  if (type === "array") return "array";
+  return "text";
+}
+
+function setCommandHint(text) {
+  if (!quickCommandHint) return;
+  quickCommandHint.textContent = text;
+}
+
+function getCommandDefinition(commandName) {
+  return thingModelCommands.find((item) => item?.command_name === commandName) || null;
+}
+
+function formatCommandOptionText(command) {
+  const name = command?.command_name || "";
+  if (!name) return "(unknown)";
+  const paramNames = Array.isArray(command?.paras)
+    ? command.paras.map((item) => item?.para_name).filter(Boolean).join("/")
+    : "";
+  return paramNames ? `${name} (${paramNames})` : `${name} (无参数)`;
+}
+
+function setPublishAvailability(enabled) {
+  if (quickPropertyInput) quickPropertyInput.disabled = !enabled;
+  if (applyPropertyBtn) applyPropertyBtn.disabled = !enabled;
+  if (publishBtn) publishBtn.disabled = !enabled;
+}
+
+function readPayloadParasForCommand(commandName) {
+  const parsed = parseJsonText(publishPayloadInput?.value || "");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  if (String(parsed.command_name || "") !== commandName) return {};
+  return parsed.paras && typeof parsed.paras === "object" && !Array.isArray(parsed.paras) ? parsed.paras : {};
+}
+
+function createCommandParamField(parameter, existingParas) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "command-param-item";
+
+  const title = document.createElement("div");
+  title.className = "command-param-title";
+
+  const nameNode = document.createElement("span");
+  nameNode.className = "command-param-name";
+  nameNode.textContent = parameter.para_name;
+  title.appendChild(nameNode);
+
+  const typeNode = document.createElement("span");
+  typeNode.className = "command-param-type";
+  typeNode.textContent = parameter.data_type || "text";
+  title.appendChild(typeNode);
+
+  if (parameter.required) {
+    const required = document.createElement("span");
+    required.className = "command-param-required";
+    required.textContent = "必填";
+    title.appendChild(required);
+  }
+
+  wrapper.appendChild(title);
+
+  const inputType = normalizeCommandParamType(parameter.data_type);
+  const enumList = Array.isArray(parameter.enum_list) ? parameter.enum_list : [];
+  const existingValue = Object.prototype.hasOwnProperty.call(existingParas, parameter.para_name)
+    ? existingParas[parameter.para_name]
+    : undefined;
+
+  let control = null;
+  if (enumList.length > 0) {
+    const select = document.createElement("select");
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = parameter.required ? "请选择" : "(可选)";
+    select.appendChild(emptyOption);
+    for (const optionValue of enumList) {
+      const option = document.createElement("option");
+      option.value = String(optionValue);
+      option.textContent = String(optionValue);
+      select.appendChild(option);
+    }
+    if (existingValue !== undefined && existingValue !== null) {
+      select.value = String(existingValue);
+    } else if (parameter.required && enumList.length > 0) {
+      select.value = String(enumList[0]);
+    }
+    control = select;
+  } else if (inputType === "bool") {
+    const select = document.createElement("select");
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = parameter.required ? "请选择" : "(可选)";
+    select.appendChild(emptyOption);
+
+    const falseOption = document.createElement("option");
+    falseOption.value = "false";
+    falseOption.textContent = "false";
+    select.appendChild(falseOption);
+
+    const trueOption = document.createElement("option");
+    trueOption.value = "true";
+    trueOption.textContent = "true";
+    select.appendChild(trueOption);
+
+    if (existingValue !== undefined && existingValue !== null) {
+      select.value = String(Boolean(existingValue));
+    } else if (parameter.required) {
+      select.value = "false";
+    }
+    control = select;
+  } else if (inputType === "number") {
+    const input = document.createElement("input");
+    input.type = "number";
+    if (parameter.min !== null && parameter.min !== undefined) input.min = String(parameter.min);
+    if (parameter.max !== null && parameter.max !== undefined) input.max = String(parameter.max);
+    if (parameter.step !== null && parameter.step !== undefined) {
+      input.step = String(parameter.step);
+    } else {
+      input.step = "any";
+    }
+    if (existingValue !== undefined && existingValue !== null) {
+      input.value = String(existingValue);
+    } else if (parameter.required) {
+      input.value = String(parameter.min !== null && parameter.min !== undefined ? parameter.min : 0);
+    }
+    control = input;
+  } else if (inputType === "struct" || inputType === "array") {
+    const textarea = document.createElement("textarea");
+    textarea.rows = 2;
+    textarea.placeholder = inputType === "struct" ? '{"key":"value"}' : "[1,2,3]";
+    if (existingValue !== undefined && existingValue !== null) {
+      textarea.value = formatJsonPretty(existingValue);
+    } else if (parameter.required) {
+      textarea.value = inputType === "struct" ? "{}" : "[]";
+    }
+    control = textarea;
+  } else {
+    const input = document.createElement("input");
+    input.type = "text";
+    if (existingValue !== undefined && existingValue !== null) {
+      input.value = String(existingValue);
+    }
+    control = input;
+  }
+
+  control.setAttribute("data-command-param", "1");
+  control.setAttribute("data-param-name", parameter.para_name);
+  control.setAttribute("data-param-type", inputType);
+  control.setAttribute("data-required", parameter.required ? "1" : "0");
+  wrapper.appendChild(control);
+
+  const descParts = [];
+  if (parameter.unit) descParts.push(`单位: ${parameter.unit}`);
+  if (parameter.description) descParts.push(parameter.description);
+  if (descParts.length > 0) {
+    const desc = document.createElement("div");
+    desc.className = "command-param-desc";
+    desc.textContent = descParts.join(" · ");
+    wrapper.appendChild(desc);
+  }
+
+  return wrapper;
+}
+
+function renderCommandParamForm(commandName) {
+  if (!quickParamForm) return;
+  quickParamForm.innerHTML = "";
+
+  if (!thingModelCommands.length) {
+    setPublishAvailability(false);
+    setCommandHint("未同步到可用命令，请先连接并同步模型。");
+    const empty = document.createElement("div");
+    empty.className = "command-param-empty";
+    empty.textContent = "当前没有可用命令。";
+    quickParamForm.appendChild(empty);
+    return;
+  }
+
+  setPublishAvailability(true);
+  const command = getCommandDefinition(commandName);
+  if (!command) {
+    setCommandHint("请选择命令。");
+    const empty = document.createElement("div");
+    empty.className = "command-param-empty";
+    empty.textContent = "选择命令后可填写参数。";
+    quickParamForm.appendChild(empty);
+    return;
+  }
+
+  const params = Array.isArray(command.paras) ? command.paras : [];
+  const existingParas = readPayloadParasForCommand(command.command_name);
+  setCommandHint(command.description || `参数数量: ${params.length}`);
+
+  if (!params.length) {
+    const empty = document.createElement("div");
+    empty.className = "command-param-empty";
+    empty.textContent = "该命令无参数，点击“填充”即可生成 payload。";
+    quickParamForm.appendChild(empty);
+    return;
+  }
+
+  for (const parameter of params) {
+    quickParamForm.appendChild(createCommandParamField(parameter, existingParas));
+  }
+}
+
 function renderQuickCommandOptions() {
   if (!quickPropertyInput) return;
+  const previousValue = String(quickPropertyInput.value || "").trim();
   quickPropertyInput.innerHTML = "";
 
-  const options = [
-    { value: "", text: "选择命令" },
-    { value: "turn_light", text: "turn_light (Light_Status)" },
-    { value: "turn_relay", text: "turn_relay (Relay_Status)" },
-    { value: "blink_light", text: "blink_light (blink_count/on_ms/off_ms)" },
-    { value: "blink_relay", text: "blink_relay (blink_count/on_ms/off_ms)" }
-  ];
-
-  for (const item of options) {
+  if (!thingModelCommands.length) {
     const option = document.createElement("option");
-    option.value = item.value;
-    option.textContent = item.text;
+    option.value = "";
+    option.textContent = "请先同步模型";
+    quickPropertyInput.appendChild(option);
+    quickPropertyInput.value = "";
+    renderCommandParamForm("");
+    return;
+  }
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "选择命令";
+  quickPropertyInput.appendChild(placeholder);
+
+  for (const command of thingModelCommands) {
+    const option = document.createElement("option");
+    option.value = command.command_name;
+    option.textContent = formatCommandOptionText(command);
     quickPropertyInput.appendChild(option);
   }
 
-  applyQuickInputHint();
+  const nextValue = getCommandDefinition(previousValue) ? previousValue : thingModelCommands[0].command_name;
+  quickPropertyInput.value = nextValue;
+  renderCommandParamForm(nextValue);
 }
 
 function fillDefaultCommandPayload() {
   if (!publishPayloadInput) return;
-  if (String(publishPayloadInput.value || "").trim()) return;
+  const existingText = String(publishPayloadInput.value || "").trim();
+  if (existingText) {
+    const existing = parseJsonText(existingText);
+    if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+      const existingCommand = String(existing.command_name || "").trim();
+      if (existingCommand) return;
+    } else {
+      return;
+    }
+  }
+
+  const firstCommand = thingModelCommands[0];
+  const commandName = firstCommand?.command_name || "";
+  const serviceId = String(currentConfig?.serviceId || "Rets2").trim() || "Rets2";
+
+  const paras = {};
+  for (const parameter of Array.isArray(firstCommand?.paras) ? firstCommand.paras : []) {
+    if (!parameter.required) continue;
+    const enumList = Array.isArray(parameter.enum_list) ? parameter.enum_list : [];
+    const type = normalizeCommandParamType(parameter.data_type);
+    if (enumList.length > 0) {
+      paras[parameter.para_name] = enumList[0];
+    } else if (type === "number") {
+      paras[parameter.para_name] = parameter.min !== null && parameter.min !== undefined ? parameter.min : 0;
+    } else if (type === "bool") {
+      paras[parameter.para_name] = false;
+    } else if (type === "array") {
+      paras[parameter.para_name] = [];
+    } else if (type === "struct") {
+      paras[parameter.para_name] = {};
+    } else {
+      paras[parameter.para_name] = "";
+    }
+  }
+
   publishPayloadInput.value = JSON.stringify(
     {
-      service_id: "Rets2",
-      command_name: "turn_light",
-      paras: {
-        Light_Status: 1
-      }
+      service_id: serviceId,
+      command_name: commandName,
+      paras
     },
     null,
     2
@@ -217,62 +453,70 @@ function syncPayloadServiceId() {
   publishPayloadInput.value = JSON.stringify(parsed, null, 2);
 }
 
-function applyQuickInputHint() {
-  if (!quickPropertyInput || !quickValueInput) return;
-  const commandName = String(quickPropertyInput.value || "").trim();
+function parseCommandFieldValue(rawValue, parameter, commandName) {
+  const dataType = normalizeCommandParamType(parameter.data_type);
+  const fieldLabel = `${commandName}.${parameter.para_name}`;
+  let parsedValue = rawValue;
 
-  if (commandName === "blink_light" || commandName === "blink_relay") {
-    quickValueInput.placeholder = '{"blink_count":3,"on_ms":200,"off_ms":200}';
-    return;
+  if (dataType === "number") {
+    const num = Number(rawValue);
+    if (!Number.isFinite(num)) throw new Error(`${fieldLabel} 需要数字。`);
+    parsedValue = num;
+  } else if (dataType === "bool") {
+    const text = String(rawValue).trim().toLowerCase();
+    if (text === "true" || text === "1") {
+      parsedValue = true;
+    } else if (text === "false" || text === "0") {
+      parsedValue = false;
+    } else {
+      throw new Error(`${fieldLabel} 需要布尔值。`);
+    }
+  } else if (dataType === "struct" || dataType === "array") {
+    try {
+      parsedValue = JSON.parse(String(rawValue));
+    } catch (_error) {
+      throw new Error(`${fieldLabel} 需要合法 JSON。`);
+    }
+    if (dataType === "struct" && (!parsedValue || typeof parsedValue !== "object" || Array.isArray(parsedValue))) {
+      throw new Error(`${fieldLabel} 需要对象。`);
+    }
+    if (dataType === "array" && !Array.isArray(parsedValue)) {
+      throw new Error(`${fieldLabel} 需要数组。`);
+    }
+  } else {
+    parsedValue = String(rawValue);
   }
 
-  quickValueInput.placeholder = "0 或 1";
+  const enumList = Array.isArray(parameter.enum_list) ? parameter.enum_list : [];
+  if (enumList.length > 0 && !enumList.some((item) => String(item) === String(parsedValue))) {
+    throw new Error(`${fieldLabel} 取值必须为: ${enumList.join(", ")}`);
+  }
+
+  return parsedValue;
 }
 
-function parseBlinkQuickInput(valueText, commandName) {
-  const text = String(valueText || "").trim();
-  if (!text) {
-    throw new Error(`${commandName} 请输入参数：{"blink_count":3,"on_ms":200,"off_ms":200}`);
+function collectCommandParams(commandDefinition) {
+  const collected = {};
+  const fields = quickParamForm ? quickParamForm.querySelectorAll("[data-command-param='1']") : [];
+  const fieldMap = new Map();
+  for (const field of fields) {
+    fieldMap.set(field.getAttribute("data-param-name"), field);
   }
 
-  let source = null;
-  const parsed = parseJsonText(text);
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    source = parsed;
-  } else {
-    const nums = text
-      .split(/[\s,]+/)
-      .map((item) => Number(item))
-      .filter(Number.isFinite);
-    if (nums.length >= 3) {
-      source = {
-        blink_count: nums[0],
-        on_ms: nums[1],
-        off_ms: nums[2]
-      };
+  const params = Array.isArray(commandDefinition?.paras) ? commandDefinition.paras : [];
+  for (const parameter of params) {
+    const field = fieldMap.get(parameter.para_name);
+    const rawValue = field ? String(field.value ?? "").trim() : "";
+    if (!rawValue) {
+      if (parameter.required) {
+        throw new Error(`${commandDefinition.command_name} 缺少必填参数: ${parameter.para_name}`);
+      }
+      continue;
     }
+    collected[parameter.para_name] = parseCommandFieldValue(rawValue, parameter, commandDefinition.command_name);
   }
 
-  if (!source) {
-    throw new Error(`${commandName} 参数格式错误，请输入 JSON 或 3 个数字。`);
-  }
-
-  const blinkCount = Math.trunc(Number(source.blink_count));
-  const onMs = Math.trunc(Number(source.on_ms));
-  const offMs = Math.trunc(Number(source.off_ms));
-
-  if (!Number.isFinite(blinkCount) || !Number.isFinite(onMs) || !Number.isFinite(offMs)) {
-    throw new Error(`${commandName} 参数必须是数字。`);
-  }
-  if (blinkCount <= 0 || onMs <= 0 || offMs <= 0) {
-    throw new Error(`${commandName} 参数必须大于 0。`);
-  }
-
-  return {
-    blink_count: blinkCount,
-    on_ms: onMs,
-    off_ms: offMs
-  };
+  return collected;
 }
 
 function renderSubscriptions(topics) {
@@ -830,6 +1074,7 @@ function pushAirHumidityHistory(item) {
 
 function renderThingModel(modelData) {
   thingModelProperties = Array.isArray(modelData?.properties) ? modelData.properties : [];
+  thingModelCommands = Array.isArray(modelData?.commands) ? modelData.commands : [];
   if (modelPropertyList) modelPropertyList.innerHTML = "";
   if (modelMeta) modelMeta.textContent = shortSource(modelData?.source, modelData?.updatedAt, modelData?.lastError);
 
@@ -850,7 +1095,9 @@ function renderThingModel(modelData) {
       }
     }
   }
-
+  renderQuickCommandOptions();
+  fillDefaultCommandPayload();
+  syncPayloadServiceId();
 }
 
 function renderPropertyState(data) {
@@ -1040,8 +1287,14 @@ function applyPropertyToPayload() {
     return;
   }
 
+  const commandDefinition = getCommandDefinition(commandName);
+  if (!commandDefinition) {
+    pushLine(logList, `命令未同步: ${commandName}，请先同步模型`, "warn");
+    return;
+  }
+
   let payloadObj = {
-    service_id: "Rets2",
+    service_id: String(currentConfig?.serviceId || "Rets2").trim() || "Rets2",
     command_name: commandName,
     paras: {}
   };
@@ -1058,29 +1311,15 @@ function applyPropertyToPayload() {
     };
   }
 
-  const valueText = String(quickValueInput?.value || "").trim();
   let normalizedParas = {};
-
-  if (commandName === "turn_light" || commandName === "turn_relay") {
-    if (!valueText) {
-      pushLine(logList, "turn_light / turn_relay 请输入 0 或 1", "warn");
-      return;
-    }
-    const normalizedValue = Number(parseSmartValue(valueText)) > 0 ? 1 : 0;
-    const paramKey = commandName === "turn_light" ? "Light_Status" : "Relay_Status";
-    normalizedParas = { [paramKey]: normalizedValue };
-  } else if (commandName === "blink_light" || commandName === "blink_relay") {
-    try {
-      normalizedParas = parseBlinkQuickInput(valueText, commandName);
-    } catch (error) {
-      pushLine(logList, error.message, "warn");
-      return;
-    }
-  } else {
-    pushLine(logList, `暂不支持命令: ${commandName}`, "warn");
+  try {
+    normalizedParas = collectCommandParams(commandDefinition);
+  } catch (error) {
+    pushLine(logList, error.message, "warn");
     return;
   }
 
+  payloadObj.service_id = String(currentConfig?.serviceId || payloadObj.service_id || "Rets2").trim() || "Rets2";
   payloadObj.command_name = commandName;
   payloadObj.paras = normalizedParas;
   if (publishPayloadInput) {
@@ -1151,7 +1390,10 @@ if (applyPropertyBtn) {
 }
 
 if (quickPropertyInput) {
-  quickPropertyInput.addEventListener("change", applyQuickInputHint);
+  quickPropertyInput.addEventListener("change", () => {
+    const commandName = String(quickPropertyInput.value || "").trim();
+    renderCommandParamForm(commandName);
+  });
 }
 
 if (publishForm) {

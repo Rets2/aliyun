@@ -69,6 +69,7 @@ const state = {
   },
   thingModel: {
     properties: [],
+    commands: [],
     updatedAt: null,
     lastError: null,
     source: null
@@ -148,6 +149,7 @@ function redactConfig(config) {
 function thingModelMeta() {
   return {
     count: state.thingModel.properties.length,
+    commandCount: state.thingModel.commands.length,
     updatedAt: state.thingModel.updatedAt,
     lastError: state.thingModel.lastError,
     source: state.thingModel.source
@@ -185,6 +187,7 @@ function emitThingModelEvent(trigger = "unknown") {
   io.emit("thing_model", {
     trigger,
     properties: state.thingModel.properties,
+    commands: state.thingModel.commands,
     updatedAt: state.thingModel.updatedAt,
     lastError: state.thingModel.lastError,
     source: state.thingModel.source
@@ -304,31 +307,6 @@ function getIoTdaClient(config = state.config) {
   return client;
 }
 
-function coerceBinaryValue(value) {
-  if (typeof value === "boolean") return value ? 1 : 0;
-  if (typeof value === "number") return value > 0 ? 1 : 0;
-  const text = String(value ?? "").trim().toLowerCase();
-  if (!text) return 0;
-  if (["1", "true", "on", "open", "yes"].includes(text)) return 1;
-  if (["0", "false", "off", "close", "closed", "no"].includes(text)) return 0;
-  const parsed = Number(text);
-  if (Number.isFinite(parsed)) return parsed > 0 ? 1 : 0;
-  return 0;
-}
-
-function coerceIntegerValue(value, fieldName) {
-  if (value === undefined || value === null || value === "") {
-    throw new Error(`${fieldName} is required.`);
-  }
-
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`${fieldName} must be a number.`);
-  }
-
-  return Math.trunc(parsed);
-}
-
 function normalizeDataType(rawType, sampleValue = undefined) {
   const type = String(rawType || "").trim().toLowerCase();
   if (type) {
@@ -382,8 +360,60 @@ function normalizePropertyList(sourceProperties) {
     .sort((a, b) => a.identifier.localeCompare(b.identifier));
 }
 
-function setThingModel(properties, source, trigger) {
+function parseFiniteNumberOrNull(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeCommandParameterDefinition(raw) {
+  const paraName = pickFirstNonEmpty(readField(raw, "paraName", "para_name", "name", "identifier"));
+  if (!paraName) return null;
+
+  const enumListRaw = readField(raw, "enumList", "enum_list");
+  const enumList = Array.isArray(enumListRaw)
+    ? enumListRaw.map((item) => String(item)).filter((item) => item.trim().length > 0)
+    : [];
+
+  return {
+    para_name: paraName,
+    data_type: normalizeDataType(readField(raw, "dataType", "data_type"), readField(raw, "defaultValue", "default_value")),
+    required: parseBooleanOrFallback(readField(raw, "required"), false),
+    enum_list: enumList,
+    min: parseFiniteNumberOrNull(readField(raw, "min")),
+    max: parseFiniteNumberOrNull(readField(raw, "max")),
+    step: parseFiniteNumberOrNull(readField(raw, "step")),
+    unit: pickFirstNonEmpty(readField(raw, "unit")) || "",
+    description: pickFirstNonEmpty(readField(raw, "description")) || "",
+    max_length: parseFiniteNumberOrNull(readField(raw, "maxLength", "max_length"))
+  };
+}
+
+function normalizeCommandDefinition(raw) {
+  const commandName = pickFirstNonEmpty(readField(raw, "commandName", "command_name", "name"));
+  if (!commandName) return null;
+
+  const rawParas = readField(raw, "paras");
+  const paras = Array.isArray(rawParas) ? rawParas.map(normalizeCommandParameterDefinition).filter(Boolean) : [];
+
+  return {
+    command_name: commandName,
+    description: pickFirstNonEmpty(readField(raw, "description")) || "",
+    paras
+  };
+}
+
+function normalizeCommandList(sourceCommands) {
+  if (!Array.isArray(sourceCommands)) return [];
+  return sourceCommands
+    .map(normalizeCommandDefinition)
+    .filter(Boolean)
+    .sort((a, b) => a.command_name.localeCompare(b.command_name));
+}
+
+function setThingModel(properties, commands, source, trigger) {
   state.thingModel.properties = properties;
+  state.thingModel.commands = Array.isArray(commands) ? commands : [];
   state.thingModel.updatedAt = nowIso();
   state.thingModel.lastError = null;
   state.thingModel.source = source;
@@ -580,18 +610,17 @@ async function refreshThingModelProperties(trigger = "manual") {
     state.config.serviceId = resolvedServiceId;
 
     const properties = normalizePropertyList(readField(targetService, "properties") || []);
-    if (properties.length === 0) {
-      throw new Error(`Service ${resolvedServiceId} has no properties.`);
-    }
-
-    setThingModel(properties, "huawei_show_product", trigger);
+    const commands = normalizeCommandList(readField(targetService, "commands") || []);
+    setThingModel(properties, commands, "huawei_show_product", trigger);
     emitLog("info", "Thing model updated via Huawei ShowProduct.", {
       serviceId: resolvedServiceId,
-      count: properties.length
+      propertyCount: properties.length,
+      commandCount: commands.length
     });
 
     return {
       properties,
+      commands,
       updatedAt: state.thingModel.updatedAt,
       lastError: null,
       source: state.thingModel.source
@@ -816,17 +845,91 @@ function parsePayloadObject(payload) {
   return payload;
 }
 
-function detectCommandNameByParams(params) {
-  if (!isPlainObject(params)) return "";
-  const hasLight = Object.prototype.hasOwnProperty.call(params, "Light_Status");
-  const hasRelay = Object.prototype.hasOwnProperty.call(params, "Relay_Status");
+function matchesEnum(enumList, value) {
+  if (!Array.isArray(enumList) || enumList.length === 0) return true;
+  const target = String(value);
+  return enumList.some((item) => String(item) === target);
+}
 
-  if (hasLight && hasRelay) {
-    throw new Error("params cannot contain both Light_Status and Relay_Status in one command.");
+function coerceBooleanValue(value, fieldName) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 0) return false;
+    if (value === 1) return true;
   }
-  if (hasLight) return "turn_light";
-  if (hasRelay) return "turn_relay";
-  return "";
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(text)) return true;
+  if (["false", "0", "no", "n", "off"].includes(text)) return false;
+  throw new Error(`${fieldName} must be boolean.`);
+}
+
+function parseJsonTextOrThrow(value, fieldName) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    throw new Error(`${fieldName} must be valid JSON.`);
+  }
+}
+
+function normalizeCommandParamValue(value, parameter, commandName) {
+  const fieldName = `${commandName} paras.${parameter.para_name}`;
+  const dataType = normalizeDataType(parameter?.data_type);
+  let normalized = value;
+
+  if (dataType === "number") {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      throw new Error(`${fieldName} must be a number.`);
+    }
+    if (parameter.min !== null && num < parameter.min) {
+      throw new Error(`${fieldName} must be >= ${parameter.min}.`);
+    }
+    if (parameter.max !== null && num > parameter.max) {
+      throw new Error(`${fieldName} must be <= ${parameter.max}.`);
+    }
+    if (parameter.step !== null && parameter.step > 0) {
+      const base = parameter.min !== null ? parameter.min : 0;
+      const quotient = (num - base) / parameter.step;
+      const rounded = Math.round(quotient);
+      if (Math.abs(quotient - rounded) > 1e-9) {
+        throw new Error(`${fieldName} must align with step ${parameter.step}.`);
+      }
+    }
+    normalized = num;
+  } else if (dataType === "bool") {
+    normalized = coerceBooleanValue(value, fieldName);
+  } else if (dataType === "array") {
+    const parsed = parseJsonTextOrThrow(value, fieldName);
+    if (!Array.isArray(parsed)) {
+      throw new Error(`${fieldName} must be an array.`);
+    }
+    normalized = parsed;
+  } else if (dataType === "struct") {
+    const parsed = parseJsonTextOrThrow(value, fieldName);
+    if (!isPlainObject(parsed)) {
+      throw new Error(`${fieldName} must be an object.`);
+    }
+    normalized = parsed;
+  } else {
+    normalized = typeof value === "string" ? value : String(value);
+    if (parameter.max_length !== null && normalized.length > parameter.max_length) {
+      throw new Error(`${fieldName} length must be <= ${parameter.max_length}.`);
+    }
+  }
+
+  if (!matchesEnum(parameter.enum_list, normalized) && !matchesEnum(parameter.enum_list, value)) {
+    throw new Error(`${fieldName} must be one of: ${parameter.enum_list.join(", ")}.`);
+  }
+
+  return normalized;
+}
+
+function listSyncedCommandNames() {
+  const names = Array.isArray(state.thingModel.commands)
+    ? state.thingModel.commands.map((item) => item?.command_name).filter(Boolean)
+    : [];
+  return names.length ? names.join(", ") : "(none)";
 }
 
 function normalizeCommandPayload(payload) {
@@ -839,113 +942,57 @@ function normalizeCommandPayload(payload) {
     DEFAULT_SERVICE_ID
   );
 
-  let commandName = pickFirstNonEmpty(readField(body, "command_name", "commandName"));
-  let paras = isPlainObject(readField(body, "paras")) ? { ...readField(body, "paras") } : {};
-
-  const method = String(readField(body, "method") || "").trim();
-  const params = isPlainObject(readField(body, "params")) ? { ...readField(body, "params") } : {};
-
+  const commandName = String(pickFirstNonEmpty(readField(body, "command_name", "commandName"))).trim();
   if (!commandName) {
-    if (method === "thing.service.property.set" || Object.keys(params).length > 0) {
-      commandName = detectCommandNameByParams(params);
-      if (commandName) {
-        warnings.push("Legacy property payload detected and auto-converted to Huawei command payload.");
-        paras = { ...params };
-      }
+    throw new Error("Missing command_name. Please use a command synced from Huawei thing model.");
+  }
+
+  if (!Array.isArray(state.thingModel.commands) || state.thingModel.commands.length === 0) {
+    throw new Error("No command definitions synced from cloud. Please connect and refresh model.");
+  }
+
+  const commandDefinition = state.thingModel.commands.find((item) => item.command_name === commandName);
+  if (!commandDefinition) {
+    throw new Error(`Unsupported command_name: ${commandName}. Synced commands: ${listSyncedCommandNames()}.`);
+  }
+
+  const rawParas = readField(body, "paras");
+  if (rawParas !== undefined && rawParas !== null && !isPlainObject(rawParas)) {
+    throw new Error("paras must be an object.");
+  }
+  const paras = isPlainObject(rawParas) ? { ...rawParas } : {};
+
+  const parameterDefinitions = Array.isArray(commandDefinition.paras) ? commandDefinition.paras : [];
+  const parameterMap = new Map(parameterDefinitions.map((item) => [item.para_name, item]));
+
+  const unknownParas = Object.keys(paras).filter((key) => !parameterMap.has(key));
+  if (unknownParas.length > 0) {
+    throw new Error(`Unknown paras for ${commandName}: ${unknownParas.join(", ")}.`);
+  }
+
+  const normalizedParas = {};
+  for (const [key, value] of Object.entries(paras)) {
+    if (value === null || value === undefined) {
+      throw new Error(`${commandName} paras.${key} cannot be null.`);
+    }
+    const definition = parameterMap.get(key);
+    normalizedParas[key] = normalizeCommandParamValue(value, definition, commandName);
+  }
+
+  for (const parameter of parameterDefinitions) {
+    if (parameter.required && !Object.prototype.hasOwnProperty.call(normalizedParas, parameter.para_name)) {
+      throw new Error(`${commandName} requires paras.${parameter.para_name}.`);
     }
   }
 
-  if (!commandName) {
-    throw new Error("Missing command_name. Supported commands: turn_light, turn_relay, blink_light, blink_relay.");
-  }
-
-  commandName = String(commandName).trim();
-
-  if (commandName === "turn_light") {
-    const rawValue = paras.Light_Status;
-    if (rawValue === undefined) {
-      throw new Error("turn_light requires paras.Light_Status.");
-    }
-
-    return {
-      normalizedPayload: {
-        service_id: serviceId,
-        command_name: "turn_light",
-        paras: {
-          Light_Status: coerceBinaryValue(rawValue)
-        }
-      },
-      warnings
-    };
-  }
-
-  if (commandName === "turn_relay") {
-    const rawValue = paras.Relay_Status;
-    if (rawValue === undefined) {
-      throw new Error("turn_relay requires paras.Relay_Status.");
-    }
-
-    return {
-      normalizedPayload: {
-        service_id: serviceId,
-        command_name: "turn_relay",
-        paras: {
-          Relay_Status: coerceBinaryValue(rawValue)
-        }
-      },
-      warnings
-    };
-  }
-
-  if (commandName === "blink_light") {
-    const blinkCount = coerceIntegerValue(paras.blink_count, "blink_light paras.blink_count");
-    const onMs = coerceIntegerValue(paras.on_ms, "blink_light paras.on_ms");
-    const offMs = coerceIntegerValue(paras.off_ms, "blink_light paras.off_ms");
-
-    if (blinkCount <= 0) throw new Error("blink_light paras.blink_count must be > 0.");
-    if (onMs <= 0) throw new Error("blink_light paras.on_ms must be > 0.");
-    if (offMs <= 0) throw new Error("blink_light paras.off_ms must be > 0.");
-
-    return {
-      normalizedPayload: {
-        service_id: serviceId,
-        command_name: "blink_light",
-        paras: {
-          blink_count: blinkCount,
-          on_ms: onMs,
-          off_ms: offMs
-        }
-      },
-      warnings
-    };
-  }
-
-  if (commandName === "blink_relay") {
-    const blinkCount = coerceIntegerValue(paras.blink_count, "blink_relay paras.blink_count");
-    const onMs = coerceIntegerValue(paras.on_ms, "blink_relay paras.on_ms");
-    const offMs = coerceIntegerValue(paras.off_ms, "blink_relay paras.off_ms");
-
-    if (blinkCount <= 0) throw new Error("blink_relay paras.blink_count must be > 0.");
-    if (onMs <= 0) throw new Error("blink_relay paras.on_ms must be > 0.");
-    if (offMs <= 0) throw new Error("blink_relay paras.off_ms must be > 0.");
-
-    return {
-      normalizedPayload: {
-        service_id: serviceId,
-        command_name: "blink_relay",
-        paras: {
-          blink_count: blinkCount,
-          on_ms: onMs,
-          off_ms: offMs
-        }
-      },
-      warnings
-    };
-  }
-
-  throw new Error(
-    `Unsupported command_name: ${commandName}. Allowed: turn_light, turn_relay, blink_light, blink_relay.`
-  );
+  return {
+    normalizedPayload: {
+      service_id: serviceId,
+      command_name: commandName,
+      paras: normalizedParas
+    },
+    warnings
+  };
 }
 
 async function retryCloudDispatch(actionName, runner) {
@@ -1052,6 +1099,7 @@ app.get("/api/model/properties", (req, res) => {
   res.json({
     ok: true,
     properties: state.thingModel.properties,
+    commands: state.thingModel.commands,
     updatedAt: state.thingModel.updatedAt,
     lastError: state.thingModel.lastError,
     source: state.thingModel.source
@@ -1079,6 +1127,7 @@ app.post("/api/model/refresh", async (req, res) => {
       ok: false,
       message: error.message,
       properties: state.thingModel.properties,
+      commands: state.thingModel.commands,
       updatedAt: state.thingModel.updatedAt,
       lastError: state.thingModel.lastError,
       source: state.thingModel.source
@@ -1195,6 +1244,7 @@ io.on("connection", (socket) => {
   socket.emit("thing_model", {
     trigger: "init",
     properties: state.thingModel.properties,
+    commands: state.thingModel.commands,
     updatedAt: state.thingModel.updatedAt,
     lastError: state.thingModel.lastError,
     source: state.thingModel.source

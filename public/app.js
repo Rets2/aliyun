@@ -19,20 +19,23 @@ const logList = document.getElementById("logList");
 const subscriptionPanel = document.getElementById("subscriptionPanel");
 const debugModeHint = document.getElementById("debugModeHint");
 const connectionValue = document.getElementById("connectionValue");
-const modelCountValue = document.getElementById("modelCountValue");
-const stateCountValue = document.getElementById("stateCountValue");
+const targetStatusValue = document.getElementById("targetStatusValue");
 
 const soilChartCanvas = document.getElementById("soilChartCanvas");
 const soilChartEmpty = document.getElementById("soilChartEmpty");
 const soilCurrentValue = document.getElementById("soilCurrentValue");
 const soilMinValue = document.getElementById("soilMinValue");
 const soilMaxValue = document.getElementById("soilMaxValue");
-const miniSoilCanvas = document.getElementById("miniSoilCanvas");
-const miniStateCanvas = document.getElementById("miniStateCanvas");
-const miniPublishCanvas = document.getElementById("miniPublishCanvas");
-const miniSoilValue = document.getElementById("miniSoilValue");
-const miniStateValue = document.getElementById("miniStateValue");
-const miniPublishValue = document.getElementById("miniPublishValue");
+const airTempChartCanvas = document.getElementById("airTempChartCanvas");
+const airTempChartEmpty = document.getElementById("airTempChartEmpty");
+const airTempCurrentValue = document.getElementById("airTempCurrentValue");
+const airTempMinValue = document.getElementById("airTempMinValue");
+const airTempMaxValue = document.getElementById("airTempMaxValue");
+const airHumidityChartCanvas = document.getElementById("airHumidityChartCanvas");
+const airHumidityChartEmpty = document.getElementById("airHumidityChartEmpty");
+const airHumidityCurrentValue = document.getElementById("airHumidityCurrentValue");
+const airHumidityMinValue = document.getElementById("airHumidityMinValue");
+const airHumidityMaxValue = document.getElementById("airHumidityMaxValue");
 
 const connectWithEnvBtn = document.getElementById("connectWithEnvBtn");
 const disconnectBtn = document.getElementById("disconnectBtn");
@@ -47,21 +50,29 @@ let currentConfig = null;
 let thingModelProperties = [];
 let currentPropertyState = [];
 let resolvedSoilIdentifier = "";
+let resolvedAirTempIdentifier = "";
+let resolvedAirHumidityIdentifier = "";
 let soilUnit = "";
+let airTempUnit = "";
+let airHumidityUnit = "";
 let chartResizeTimer = null;
 
 const MAX_LINES = 260;
 const SOIL_HISTORY_LIMIT = 90;
-const MINI_HISTORY_LIMIT = 60;
 const soilHistory = [];
-const stateCountHistory = [];
-const publishCountHistory = [];
-let publishCount = 0;
+const airTempHistory = [];
+const airHumidityHistory = [];
 
 function fmtTime(ts) {
   const t = ts ? new Date(ts) : new Date();
   if (Number.isNaN(t.getTime())) return "-";
   return t.toLocaleString("zh-CN", { hour12: false });
+}
+
+function fmtAxisTime(ts) {
+  const t = new Date(ts);
+  if (Number.isNaN(t.getTime())) return "--:--";
+  return t.toLocaleTimeString("zh-CN", { hour12: false });
 }
 
 function safeJson(value) {
@@ -400,132 +411,22 @@ function toFiniteNumber(raw) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function pushSeries(series, value, limit = MINI_HISTORY_LIMIT) {
-  if (!Array.isArray(series) || !Number.isFinite(value)) return;
-  series.push(value);
-  while (series.length > limit) {
-    series.shift();
-  }
-}
-
-function drawMiniSparkline(canvas, values, options = {}) {
-  if (!canvas) return;
-
-  const rect = canvas.getBoundingClientRect();
-  const width = Math.max(120, Math.floor(rect.width || 120));
-  const height = Math.max(40, Math.floor(rect.height || 40));
-  const dpr = window.devicePixelRatio || 1;
-
-  canvas.width = Math.floor(width * dpr);
-  canvas.height = Math.floor(height * dpr);
-
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-
-  const points = (Array.isArray(values) ? values : []).map(Number).filter(Number.isFinite);
-  if (!points.length) return;
-
-  const padding = { left: 4, right: 4, top: 6, bottom: 6 };
-  const chartW = width - padding.left - padding.right;
-  const chartH = height - padding.top - padding.bottom;
-  let minVal = Math.min(...points);
-  let maxVal = Math.max(...points);
-
-  if (minVal === maxVal) {
-    minVal -= 1;
-    maxVal += 1;
-  }
-
-  const stroke = options.stroke || "#1f2328";
-  const fill = options.fill || "rgba(31, 35, 40, 0.12)";
-  const point = options.point || stroke;
-
-  const toX = (index) =>
-    points.length === 1
-      ? padding.left + chartW / 2
-      : padding.left + (index / (points.length - 1)) * chartW;
-  const toY = (value) => padding.top + ((maxVal - value) / (maxVal - minVal)) * chartH;
-
-  if (points.length > 1) {
-    ctx.beginPath();
-    for (let i = 0; i < points.length; i += 1) {
-      const x = toX(i);
-      const y = toY(points[i]);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.lineTo(toX(points.length - 1), padding.top + chartH);
-    ctx.lineTo(toX(0), padding.top + chartH);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-  }
-
-  ctx.beginPath();
-  for (let i = 0; i < points.length; i += 1) {
-    const x = toX(i);
-    const y = toY(points[i]);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-
-  ctx.strokeStyle = stroke;
-  ctx.lineWidth = 1.6;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.stroke();
-
-  const lx = toX(points.length - 1);
-  const ly = toY(points[points.length - 1]);
-  ctx.beginPath();
-  ctx.arc(lx, ly, 2.2, 0, Math.PI * 2);
-  ctx.fillStyle = point;
-  ctx.fill();
-}
-
 function setSoilEmptyVisible(visible) {
   if (!soilChartEmpty) return;
   soilChartEmpty.hidden = !visible;
   soilChartEmpty.classList.toggle("is-hidden", !visible);
 }
 
-function refreshMiniCharts() {
-  const soilValues = soilHistory.map((item) => item.value);
-  drawMiniSparkline(miniSoilCanvas, soilValues, {
-    stroke: "#1a7f37",
-    fill: "rgba(26, 127, 55, 0.15)",
-    point: "#1a7f37"
-  });
-  drawMiniSparkline(miniStateCanvas, stateCountHistory, {
-    stroke: "#0969da",
-    fill: "rgba(9, 105, 218, 0.15)",
-    point: "#0969da"
-  });
-  drawMiniSparkline(miniPublishCanvas, publishCountHistory, {
-    stroke: "#8250df",
-    fill: "rgba(130, 80, 223, 0.15)",
-    point: "#8250df"
-  });
-
-  if (miniSoilValue) {
-    const last = soilValues.length ? soilValues[soilValues.length - 1] : null;
-    miniSoilValue.textContent = last === null ? "--" : formatValue(last);
-  }
-  if (miniStateValue) {
-    const last = stateCountHistory.length ? stateCountHistory[stateCountHistory.length - 1] : null;
-    miniStateValue.textContent = last === null ? "--" : formatValue(last);
-  }
-  if (miniPublishValue) {
-    const last = publishCountHistory.length ? publishCountHistory[publishCountHistory.length - 1] : publishCount;
-    miniPublishValue.textContent = formatValue(last ?? 0);
-  }
+function setAirTempEmptyVisible(visible) {
+  if (!airTempChartEmpty) return;
+  airTempChartEmpty.hidden = !visible;
+  airTempChartEmpty.classList.toggle("is-hidden", !visible);
 }
 
-function recordPublishPoint() {
-  publishCount += 1;
-  pushSeries(publishCountHistory, publishCount);
-  refreshMiniCharts();
+function setAirHumidityEmptyVisible(visible) {
+  if (!airHumidityChartEmpty) return;
+  airHumidityChartEmpty.hidden = !visible;
+  airHumidityChartEmpty.classList.toggle("is-hidden", !visible);
 }
 
 function scoreSoilCandidate(item) {
@@ -568,30 +469,105 @@ function resolveSoilItem(items) {
   return sorted[0].item;
 }
 
-function drawSoilChart() {
-  if (!soilChartCanvas) return;
+function scoreAirTempCandidate(item) {
+  const merged = `${item?.identifier || ""} ${item?.name || ""}`.toLowerCase();
+  const mergedRaw = `${item?.identifier || ""}${item?.name || ""}`;
+  let score = 0;
 
-  const rect = soilChartCanvas.getBoundingClientRect();
+  if (/(air[_\s-]*(temp|temperature)|(temp|temperature).*air)/.test(merged)) score += 160;
+  if (/空气.*温|温度.*空气/.test(mergedRaw)) score += 160;
+  if (["airtemperature", "air_temp", "temperature", "airtemperaturevalue"].includes(merged.replace(/\s+/g, ""))) {
+    score += 180;
+  }
+  if (/temp|temperature/.test(merged)) score += 30;
+  if (/soil|humid/.test(merged)) score -= 35;
+
+  const n = toFiniteNumber(item?.value);
+  if (n !== null) score += 12;
+  return score;
+}
+
+function resolveAirTempItem(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return null;
+
+  if (resolvedAirTempIdentifier) {
+    const fixed = list.find((item) => item.identifier === resolvedAirTempIdentifier);
+    if (fixed) return fixed;
+  }
+
+  const sorted = [...list]
+    .map((item) => ({ item, score: scoreAirTempCandidate(item) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!sorted.length) return null;
+  resolvedAirTempIdentifier = sorted[0].item.identifier;
+  return sorted[0].item;
+}
+
+function scoreAirHumidityCandidate(item) {
+  const merged = `${item?.identifier || ""} ${item?.name || ""}`.toLowerCase();
+  const mergedRaw = `${item?.identifier || ""}${item?.name || ""}`;
+  let score = 0;
+
+  if (/(air[_\s-]*(humid|humidity)|(humid|humidity).*air)/.test(merged)) score += 160;
+  if (/空气.*湿|湿度.*空气/.test(mergedRaw)) score += 160;
+  if (["airhumidity", "air_humidity", "humidity", "airhumid"].includes(merged.replace(/\s+/g, ""))) {
+    score += 180;
+  }
+  if (/humid|humidity/.test(merged)) score += 28;
+  if (/soil/.test(merged)) score -= 80;
+  if (/temp|temperature/.test(merged)) score -= 25;
+
+  const n = toFiniteNumber(item?.value);
+  if (n !== null) score += 12;
+  return score;
+}
+
+function resolveAirHumidityItem(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return null;
+
+  if (resolvedAirHumidityIdentifier) {
+    const fixed = list.find((item) => item.identifier === resolvedAirHumidityIdentifier);
+    if (fixed) return fixed;
+  }
+
+  const sorted = [...list]
+    .map((item) => ({ item, score: scoreAirHumidityCandidate(item) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!sorted.length) return null;
+  resolvedAirHumidityIdentifier = sorted[0].item.identifier;
+  return sorted[0].item;
+}
+
+function drawMetricChart(canvas, history, color, fillTop, fillBottom, setEmptyVisible) {
+  if (!canvas) return;
+
+  const rect = canvas.getBoundingClientRect();
   const width = Math.max(220, Math.floor(rect.width || 220));
   const height = Math.max(180, Math.floor(rect.height || 180));
   const dpr = window.devicePixelRatio || 1;
 
-  soilChartCanvas.width = Math.floor(width * dpr);
-  soilChartCanvas.height = Math.floor(height * dpr);
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
 
-  const ctx = soilChartCanvas.getContext("2d");
+  const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const hasData = soilHistory.length >= 1;
-  setSoilEmptyVisible(!hasData);
+  const hasData = history.length >= 1;
+  setEmptyVisible(!hasData);
   if (!hasData) return;
 
-  const padding = { left: 36, right: 14, top: 14, bottom: 22 };
+  const padding = { left: 36, right: 14, top: 14, bottom: 34 };
   const chartW = width - padding.left - padding.right;
   const chartH = height - padding.top - padding.bottom;
 
-  const values = soilHistory.map((item) => item.value);
+  const values = history.map((item) => item.value);
   let minVal = Math.min(...values);
   let maxVal = Math.max(...values);
   if (minVal === maxVal) {
@@ -603,10 +579,7 @@ function drawSoilChart() {
   minVal -= pad;
   maxVal += pad;
 
-  const toX = (index) =>
-    soilHistory.length === 1
-      ? padding.left + chartW / 2
-      : padding.left + (index / (soilHistory.length - 1)) * chartW;
+  const toX = (index) => (history.length === 1 ? padding.left + chartW / 2 : padding.left + (index / (history.length - 1)) * chartW);
   const toY = (value) => padding.top + ((maxVal - value) / (maxVal - minVal)) * chartH;
 
   ctx.strokeStyle = "#eaeef2";
@@ -624,20 +597,20 @@ function drawSoilChart() {
   ctx.fillText(formatValue(maxVal), 3, padding.top + 4);
   ctx.fillText(formatValue(minVal), 3, padding.top + chartH);
 
-  if (soilHistory.length > 1) {
+  if (history.length > 1) {
     ctx.beginPath();
-    for (let i = 0; i < soilHistory.length; i += 1) {
+    for (let i = 0; i < history.length; i += 1) {
       const x = toX(i);
-      const y = toY(soilHistory[i].value);
+      const y = toY(history[i].value);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
 
     const gradient = ctx.createLinearGradient(0, padding.top, 0, padding.top + chartH);
-    gradient.addColorStop(0, "rgba(26, 127, 55, 0.22)");
-    gradient.addColorStop(1, "rgba(26, 127, 55, 0.02)");
+    gradient.addColorStop(0, fillTop);
+    gradient.addColorStop(1, fillBottom);
 
-    ctx.lineTo(toX(soilHistory.length - 1), padding.top + chartH);
+    ctx.lineTo(toX(history.length - 1), padding.top + chartH);
     ctx.lineTo(toX(0), padding.top + chartH);
     ctx.closePath();
     ctx.fillStyle = gradient;
@@ -645,26 +618,57 @@ function drawSoilChart() {
   }
 
   ctx.beginPath();
-  for (let i = 0; i < soilHistory.length; i += 1) {
+  for (let i = 0; i < history.length; i += 1) {
     const x = toX(i);
-    const y = toY(soilHistory[i].value);
+    const y = toY(history[i].value);
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
 
-  ctx.strokeStyle = "#1a7f37";
+  ctx.strokeStyle = color;
   ctx.lineWidth = 2.2;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.stroke();
 
-  const lastIndex = soilHistory.length - 1;
+  const lastIndex = history.length - 1;
   const lx = toX(lastIndex);
-  const ly = toY(soilHistory[lastIndex].value);
+  const ly = toY(history[lastIndex].value);
   ctx.beginPath();
   ctx.arc(lx, ly, 4, 0, Math.PI * 2);
-  ctx.fillStyle = "#1a7f37";
+  ctx.fillStyle = color;
   ctx.fill();
+
+  const start = history[0];
+  const mid = history[Math.floor(lastIndex / 2)];
+  const end = history[lastIndex];
+  const axisY = padding.top + chartH + 14;
+
+  ctx.fillStyle = "#8b949e";
+  ctx.font = '10px "Segoe UI"';
+  ctx.textBaseline = "middle";
+
+  ctx.textAlign = "left";
+  ctx.fillText(fmtAxisTime(start?.ts), padding.left, axisY);
+
+  ctx.textAlign = "center";
+  if (lastIndex >= 2) {
+    ctx.fillText(fmtAxisTime(mid?.ts), padding.left + chartW / 2, axisY);
+  }
+
+  ctx.textAlign = "right";
+  ctx.fillText(fmtAxisTime(end?.ts), padding.left + chartW, axisY);
+}
+
+function drawSoilChart() {
+  drawMetricChart(
+    soilChartCanvas,
+    soilHistory,
+    "#1a7f37",
+    "rgba(26, 127, 55, 0.22)",
+    "rgba(26, 127, 55, 0.02)",
+    setSoilEmptyVisible
+  );
 }
 
 function updateSoilKpis() {
@@ -710,13 +714,123 @@ function pushSoilHistory(item) {
   soilUnit = item?.unit || soilUnit || "";
   updateSoilKpis();
   drawSoilChart();
-  refreshMiniCharts();
+}
+
+function drawAirTempChart() {
+  drawMetricChart(
+    airTempChartCanvas,
+    airTempHistory,
+    "#d97706",
+    "rgba(217, 119, 6, 0.22)",
+    "rgba(217, 119, 6, 0.02)",
+    setAirTempEmptyVisible
+  );
+}
+
+function updateAirTempKpis() {
+  if (!airTempCurrentValue || !airTempMinValue || !airTempMaxValue) return;
+
+  if (!airTempHistory.length) {
+    airTempCurrentValue.textContent = "--";
+    airTempMinValue.textContent = "--";
+    airTempMaxValue.textContent = "--";
+    return;
+  }
+
+  const values = airTempHistory.map((item) => item.value);
+  const current = values[values.length - 1];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const suffix = airTempUnit ? ` ${airTempUnit}` : "";
+
+  airTempCurrentValue.textContent = `${formatValue(current)}${suffix}`;
+  airTempMinValue.textContent = `${formatValue(min)}${suffix}`;
+  airTempMaxValue.textContent = `${formatValue(max)}${suffix}`;
+}
+
+function pushAirTempHistory(item) {
+  if (!item) return;
+  const num = toFiniteNumber(item.value);
+  if (num === null) return;
+
+  const ts = item?.timestamp ? new Date(item.timestamp).getTime() : Date.now();
+  const timestamp = Number.isFinite(ts) ? ts : Date.now();
+
+  const last = airTempHistory[airTempHistory.length - 1];
+  if (last && Math.abs(last.ts - timestamp) < 300) {
+    last.value = num;
+  } else {
+    airTempHistory.push({ ts: timestamp, value: num });
+  }
+
+  while (airTempHistory.length > SOIL_HISTORY_LIMIT) {
+    airTempHistory.shift();
+  }
+
+  airTempUnit = item?.unit || airTempUnit || "";
+  updateAirTempKpis();
+  drawAirTempChart();
+}
+
+function drawAirHumidityChart() {
+  drawMetricChart(
+    airHumidityChartCanvas,
+    airHumidityHistory,
+    "#0e7490",
+    "rgba(14, 116, 144, 0.22)",
+    "rgba(14, 116, 144, 0.02)",
+    setAirHumidityEmptyVisible
+  );
+}
+
+function updateAirHumidityKpis() {
+  if (!airHumidityCurrentValue || !airHumidityMinValue || !airHumidityMaxValue) return;
+
+  if (!airHumidityHistory.length) {
+    airHumidityCurrentValue.textContent = "--";
+    airHumidityMinValue.textContent = "--";
+    airHumidityMaxValue.textContent = "--";
+    return;
+  }
+
+  const values = airHumidityHistory.map((item) => item.value);
+  const current = values[values.length - 1];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const suffix = airHumidityUnit ? ` ${airHumidityUnit}` : "";
+
+  airHumidityCurrentValue.textContent = `${formatValue(current)}${suffix}`;
+  airHumidityMinValue.textContent = `${formatValue(min)}${suffix}`;
+  airHumidityMaxValue.textContent = `${formatValue(max)}${suffix}`;
+}
+
+function pushAirHumidityHistory(item) {
+  if (!item) return;
+  const num = toFiniteNumber(item.value);
+  if (num === null) return;
+
+  const ts = item?.timestamp ? new Date(item.timestamp).getTime() : Date.now();
+  const timestamp = Number.isFinite(ts) ? ts : Date.now();
+
+  const last = airHumidityHistory[airHumidityHistory.length - 1];
+  if (last && Math.abs(last.ts - timestamp) < 300) {
+    last.value = num;
+  } else {
+    airHumidityHistory.push({ ts: timestamp, value: num });
+  }
+
+  while (airHumidityHistory.length > SOIL_HISTORY_LIMIT) {
+    airHumidityHistory.shift();
+  }
+
+  airHumidityUnit = item?.unit || airHumidityUnit || "";
+  updateAirHumidityKpis();
+  drawAirHumidityChart();
 }
 
 function renderThingModel(modelData) {
   thingModelProperties = Array.isArray(modelData?.properties) ? modelData.properties : [];
   if (modelPropertyList) modelPropertyList.innerHTML = "";
-  if (modelCountValue) modelCountValue.textContent = String(thingModelProperties.length);
   if (modelMeta) modelMeta.textContent = shortSource(modelData?.source, modelData?.updatedAt, modelData?.lastError);
 
   if (modelPropertyList) {
@@ -741,9 +855,6 @@ function renderThingModel(modelData) {
 
 function renderPropertyState(data) {
   currentPropertyState = Array.isArray(data?.properties) ? data.properties : [];
-  pushSeries(stateCountHistory, currentPropertyState.length);
-
-  if (stateCountValue) stateCountValue.textContent = String(currentPropertyState.length);
   if (propertyStateMeta) {
     propertyStateMeta.textContent = shortSource(data?.source, data?.updatedAt, data?.lastError);
   }
@@ -824,11 +935,13 @@ function renderPropertyState(data) {
   }
 
   const soilItem = resolveSoilItem(currentPropertyState);
-  if (soilItem) {
-    pushSoilHistory(soilItem);
-  } else {
-    refreshMiniCharts();
-  }
+  if (soilItem) pushSoilHistory(soilItem);
+
+  const airTempItem = resolveAirTempItem(currentPropertyState);
+  if (airTempItem) pushAirTempHistory(airTempItem);
+
+  const airHumidityItem = resolveAirHumidityItem(currentPropertyState);
+  if (airHumidityItem) pushAirHumidityHistory(airHumidityItem);
 }
 
 function updateStatus(data) {
@@ -851,6 +964,19 @@ function updateStatus(data) {
       statusPill.className = "status-pill status-offline";
       statusPill.textContent = "离线";
       connectionValue.textContent = "离线";
+    }
+  }
+
+  if (targetStatusValue) {
+    const targetStatus = String(data?.targetDevice?.status || "UNKNOWN").toUpperCase();
+    targetStatusValue.textContent = targetStatus;
+    targetStatusValue.classList.remove("status-online-text", "status-offline-text", "status-unknown-text");
+    if (targetStatus === "ONLINE") {
+      targetStatusValue.classList.add("status-online-text");
+    } else if (targetStatus === "OFFLINE") {
+      targetStatusValue.classList.add("status-offline-text");
+    } else {
+      targetStatusValue.classList.add("status-unknown-text");
     }
   }
 
@@ -890,7 +1016,6 @@ function updateStatus(data) {
 
   if (data?.thingModel) {
     if (modelMeta) modelMeta.textContent = shortSource(data.thingModel.source, data.thingModel.updatedAt, data.thingModel.lastError);
-    if (modelCountValue) modelCountValue.textContent = String(data.thingModel.count ?? thingModelProperties.length);
   }
 
   if (data?.propertyState) {
@@ -900,9 +1025,6 @@ function updateStatus(data) {
         data.propertyState.updatedAt,
         data.propertyState.lastError
       );
-    }
-    if (stateCountValue) {
-      stateCountValue.textContent = String(data.propertyState.count ?? currentPropertyState.length);
     }
   }
 
@@ -1120,7 +1242,6 @@ socket.on("log", (event) => {
 });
 
 socket.on("published", (event) => {
-  recordPublishPoint();
   pushLine(logList, `已发布 ${event.topic} [${event.route || "huawei_create_command"}]`, "success", event.timestamp);
 });
 
@@ -1128,22 +1249,22 @@ window.addEventListener("resize", () => {
   if (chartResizeTimer) clearTimeout(chartResizeTimer);
   chartResizeTimer = setTimeout(() => {
     drawSoilChart();
-    refreshMiniCharts();
+    drawAirTempChart();
+    drawAirHumidityChart();
   }, 120);
 });
 
 async function init() {
   try {
-    publishCount = 0;
-    publishCountHistory.length = 0;
-    stateCountHistory.length = 0;
-    pushSeries(publishCountHistory, 0);
-    pushSeries(stateCountHistory, 0);
-
     setSoilEmptyVisible(true);
+    setAirTempEmptyVisible(true);
+    setAirHumidityEmptyVisible(true);
     drawSoilChart();
+    drawAirTempChart();
+    drawAirHumidityChart();
     updateSoilKpis();
-    refreshMiniCharts();
+    updateAirTempKpis();
+    updateAirHumidityKpis();
     renderQuickCommandOptions();
     fillDefaultCommandPayload();
 

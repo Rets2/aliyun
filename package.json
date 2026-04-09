@@ -1,18 +1,19 @@
 {
-  "name": "aliyun-iot-web-console",
+  "name": "huawei-iotda-web-console",
   "version": "1.0.0",
   "private": true,
-  "description": "Alibaba Cloud IoT device monitor and command console",
+  "description": "Huawei IoTDA device monitor and command console",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "@alicloud/pop-core": "^1.8.0",
+    "@huaweicloud/huaweicloud-sdk-core": "^3.1.190",
+    "@huaweicloud/huaweicloud-sdk-iotda": "^3.1.190",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
-    "mqtt": "^5.14.1",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "uuid": "^13.0.0"
   }
 }

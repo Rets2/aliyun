@@ -1,137 +1,96 @@
-﻿# Alibaba Cloud IoT Web Console (Non-TLS)
+﻿# Huawei IoTDA Web Console
 
-当前版本默认采用 OpenAPI 命令模式，避免网页和真实设备抢占同一 MQTT 会话。
+这是一个基于 Node.js + Socket.IO 的物联网控制台，通信链路已固定为**华为云 IoTDA OpenAPI 命令通道**。
 
-- Broker: `mqtt://<productKey>.iot-as-mqtt.<region>.aliyuncs.com:1883`
-- clientId mode: `securemode=3,signmethod=hmacsha256`
+当前实现只走以下华为云接口：
+- `CreateCommand`：下发设备命令
+- `ShowProduct`：同步产品物模型属性
+- `ShowDeviceShadow`：读取设备影子上报状态
+- `ShowDevice`：查询设备在线状态
 
-## 本地运行
+## 1. 本地启动
 
 ```bash
 npm install
 npm run start
 ```
 
-浏览器打开 `http://localhost:3000`。
+访问：`http://localhost:3000`
 
-## 阿里云 ECS 部署（Ubuntu + Nginx + PM2）
+## 2. 环境变量
 
-### 1) ECS 准备
+复制 `.env.example` 为 `.env`，并至少填写：
 
-- ECS 系统：Ubuntu 22.04/20.04
-- 安全组入站放行：`22`、`80`
-- 调试时可临时放行 `3000`，稳定后关闭
+- `HWCLOUD_REGION_ID`
+- `HWCLOUD_PROJECT_ID`
+- `HWCLOUD_AK`
+- `HWCLOUD_SK`
+- `HWCLOUD_DEVICE_ID`
+- `HWCLOUD_PRODUCT_ID`
+- `HWCLOUD_SERVICE_ID`
 
-### 2) 服务器一键引导
+可选配置：
+- `HWCLOUD_ENDPOINT`（专属实例推荐配置）
+- `HWCLOUD_INSTANCE_ID`
+- `HWCLOUD_APP_ID`
 
-在 ECS 上执行：
+运行策略配置：
+- `TARGET_ONLINE_WAIT_MS`
+- `TARGET_ONLINE_POLL_MS`
+- `STRICT_TARGET_ONLINE_CHECK`
+- `CLOUD_DISPATCH_RETRY_ATTEMPTS`
+- `CLOUD_DISPATCH_RETRY_INTERVAL_MS`
+- `PROPERTY_POLL_ON_CONNECT`
+- `PROPERTY_POLL_INTERVAL_MS`
+- `AUTO_CONNECT_ON_START`
 
-```bash
-sudo apt-get update
-sudo apt-get install -y git
-git clone https://github.com/Rets2/aliyun.git /opt/aliyun-iot-web
-cd /opt/aliyun-iot-web
-chmod +x deploy/ecs/*.sh
-./deploy/ecs/bootstrap-ubuntu.sh
+## 3. 命令格式
+
+支持命令：
+- `turn_light`（参数：`paras.Light_Status`）
+- `turn_relay`（参数：`paras.Relay_Status`）
+- `blink_light`（参数：`paras.blink_count/on_ms/off_ms`）
+- `blink_relay`（参数：`paras.blink_count/on_ms/off_ms`）
+
+示例：
+
+```json
+{
+  "service_id": "Rets2",
+  "command_name": "turn_light",
+  "paras": {
+    "Light_Status": 1
+  }
+}
 ```
 
-### 3) 填写环境变量
-
-编辑 `/opt/aliyun-iot-web/.env`，至少填写：
-
-- `ALIYUN_PRODUCT_KEY`
-- `ALIYUN_DEVICE_NAME`
-- `ALIYUN_DEVICE_SECRET`
-- `ALIYUN_REGION_ID`
-- `ALIYUN_ACCESS_KEY_ID`
-- `ALIYUN_ACCESS_KEY_SECRET`
-- `ALIYUN_IOT_INSTANCE_ID`（企业实例建议填写）
-
-推荐固定值：
-
-- `ENABLE_LOCAL_MQTT=false`
-- `ALLOW_CLOUD_ROUTE_MQTT_FALLBACK=false`
-- `PROPERTY_POLL_ON_CONNECT=true`
-- `PROPERTY_POLL_INTERVAL_MS=2000`
-- `AUTO_CONNECT_ON_START=true`
-
-变量更新后执行：
-
-```bash
-cd /opt/aliyun-iot-web
-pm2 restart aliyun-iot-web --update-env
+```json
+{
+  "service_id": "Rets2",
+  "command_name": "blink_light",
+  "paras": {
+    "blink_count": 3,
+    "on_ms": 200,
+    "off_ms": 200
+  }
+}
 ```
 
-### 4) 验证上线
-
-- 页面：`http://<ECS公网IP>`
-- 状态接口：`http://<ECS公网IP>/api/status`
-
-如果接口返回 `ok: true`，说明服务已经可用。
-
-### 5) 发布与回滚
-
-发布新代码：
-
-```bash
-cd /opt/aliyun-iot-web
-./deploy/ecs/deploy.sh
-```
-
-回滚到指定提交：
-
-```bash
-cd /opt/aliyun-iot-web
-./deploy/ecs/rollback.sh <commit-sha-or-tag>
-```
-
-### 6) 日志巡检
-
-```bash
-pm2 status
-pm2 logs aliyun-iot-web
-sudo journalctl -u nginx -n 200 --no-pager
-```
-
-## 环境变量说明（`.env`）
-
-复制 `.env.example` 为 `.env`，然后填写业务参数。
-
-关键变量：
-
-- `ALIYUN_PRODUCT_KEY`
-- `ALIYUN_DEVICE_NAME`
-- `ALIYUN_DEVICE_SECRET`
-- `ALIYUN_REGION_ID`
-- `ALIYUN_ACCESS_KEY_ID`
-- `ALIYUN_ACCESS_KEY_SECRET`
-- `ALIYUN_IOT_INSTANCE_ID`
-
-稳定性建议：
-
-- `ENABLE_LOCAL_MQTT=false`
-- `ALLOW_CLOUD_ROUTE_MQTT_FALLBACK=false`
-- `TARGET_ONLINE_WAIT_MS=15000`
-- `TARGET_ONLINE_POLL_MS=1500`
-- `STRICT_TARGET_ONLINE_CHECK=false`
-- `CLOUD_DISPATCH_RETRY_ATTEMPTS=3`
-- `CLOUD_DISPATCH_RETRY_INTERVAL_MS=2000`
-- `PROPERTY_POLL_ON_CONNECT=true`
-- `PROPERTY_POLL_INTERVAL_MS=2000`
-- `AUTO_CONNECT_ON_START=true`
-
-## 接口与事件（保持不变）
-
-HTTP:
+## 4. HTTP API
 
 - `GET /api/status`
+- `POST /api/connect`
+- `POST /api/disconnect`
 - `GET /api/model/properties`
 - `POST /api/model/refresh`
 - `GET /api/device/properties`
 - `POST /api/device/properties/refresh`
 - `POST /api/publish`
 
-Socket.IO:
+说明：
+- `POST /api/subscribe` 与 `POST /api/unsubscribe` 在华为命令通道中固定返回禁用提示。
+
+## 5. Socket 事件
 
 - `status`
 - `thing_model`
@@ -139,11 +98,71 @@ Socket.IO:
 - `published`
 - `log`
 
-## 常见错误
+## 6. ECS 部署（Ubuntu + Nginx + PM2）
 
-- `iot.Sre.IotInstanceNotFound`
-  - `ALIYUN_IOT_INSTANCE_ID` 与 `ALIYUN_REGION_ID` 不匹配
-- `iot.prod.NotExistedProduct`
-  - AK/SK 无该产品权限，或地域填错
-- `Target device ... OFFLINE`
-  - 目标设备未在线，或设备端 MQTT 会话异常
+### 方式 A：服务器通过 Git 拉取部署（推荐）
+
+首次部署：
+
+```bash
+bash deploy/ecs/bootstrap-ubuntu.sh
+```
+
+默认配置：
+- PM2 进程名：`huawei-iotda-web`
+- 安装目录：`/opt/huawei-iotda-web`
+- Nginx 配置：`deploy/ecs/nginx.huawei-iotda-web.conf`
+
+### 日常发布
+
+```bash
+bash deploy/ecs/deploy.sh
+```
+
+### 回滚
+
+```bash
+bash deploy/ecs/rollback.sh <commit-sha-or-tag>
+```
+
+### 方式 B：从本地直接上传到阿里云 ECS 部署
+
+适合你现在这种“本地开发完成后直接上传 ECS”的场景。
+
+在本机（Windows PowerShell）执行：
+
+```powershell
+.\deploy\ecs\upload-and-deploy.ps1 `
+  -Host <你的ECS公网IP> `
+  -User <你的ECS登录用户, 如 ubuntu 或 root> `
+  -KeyPath <你的SSH私钥路径>
+```
+
+脚本会自动完成：
+- 本地打包（排除 `.git/.env/node_modules`）
+- `scp` 上传到 ECS
+- 服务器安装 Node.js/PM2/Nginx（若缺失）
+- 解压部署、`npm ci`、配置 Nginx、PM2 启动
+
+部署后请在 ECS 上补全环境变量：
+
+```bash
+cd /opt/huawei-iotda-web
+cp -n .env.example .env
+vim .env
+pm2 restart huawei-iotda-web --update-env
+```
+
+## 7. 常见问题
+
+1. `ProjectId` 不匹配
+- 检查 `HWCLOUD_PROJECT_ID` 与 `HWCLOUD_REGION_ID` 是否来自同一个区域项目。
+
+2. AK/SK 鉴权失败
+- 检查 `HWCLOUD_AK`、`HWCLOUD_SK` 是否有效，并确认 IAM 权限覆盖 IoTDA 所需操作。
+
+3. 设备离线
+- `ShowDevice` 返回 `OFFLINE` 时，命令可能重试后失败。
+
+4. 物模型为空
+- 检查产品下 `service_id`（默认 `Rets2`）是否已定义属性。

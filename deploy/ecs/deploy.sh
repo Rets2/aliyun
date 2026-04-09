@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/aliyun-iot-web}"
+APP_DIR="${APP_DIR:-/opt/huawei-iotda-web}"
 BRANCH="${BRANCH:-main}"
-APP_NAME="${APP_NAME:-aliyun-iot-web}"
+APP_NAME="${APP_NAME:-huawei-iotda-web}"
 
 if [[ ! -d "${APP_DIR}/.git" ]]; then
   echo "ERROR: ${APP_DIR} is not a git repository."

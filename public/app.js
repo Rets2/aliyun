@@ -15,7 +15,6 @@ const publishRetainInput = document.getElementById("publishRetain");
 const subTopicInput = document.getElementById("subTopic");
 const subQosInput = document.getElementById("subQos");
 const subList = document.getElementById("subList");
-const messageList = document.getElementById("messageList");
 const logList = document.getElementById("logList");
 const subscriptionPanel = document.getElementById("subscriptionPanel");
 const debugModeHint = document.getElementById("debugModeHint");
@@ -149,12 +148,120 @@ async function api(path, options = {}) {
 }
 
 function fillDefaultTopic() {
-  const productKey = currentConfig?.productKey || "";
-  const deviceName = currentConfig?.deviceName || "";
-  if (!productKey || !deviceName || !publishTopicInput) return;
+  const deviceId = currentConfig?.deviceId || currentConfig?.deviceName || "";
+  if (!deviceId || !publishTopicInput) return;
   if (!publishTopicInput.value.trim()) {
-    publishTopicInput.value = `/sys/${productKey}/${deviceName}/thing/service/property/set`;
+    publishTopicInput.value = `$oc/devices/${deviceId}/sys/commands`;
   }
+}
+
+function renderQuickCommandOptions() {
+  if (!quickPropertyInput) return;
+  quickPropertyInput.innerHTML = "";
+
+  const options = [
+    { value: "", text: "选择命令" },
+    { value: "turn_light", text: "turn_light (Light_Status)" },
+    { value: "turn_relay", text: "turn_relay (Relay_Status)" },
+    { value: "blink_light", text: "blink_light (blink_count/on_ms/off_ms)" },
+    { value: "blink_relay", text: "blink_relay (blink_count/on_ms/off_ms)" }
+  ];
+
+  for (const item of options) {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = item.text;
+    quickPropertyInput.appendChild(option);
+  }
+
+  applyQuickInputHint();
+}
+
+function fillDefaultCommandPayload() {
+  if (!publishPayloadInput) return;
+  if (String(publishPayloadInput.value || "").trim()) return;
+  publishPayloadInput.value = JSON.stringify(
+    {
+      service_id: "Rets2",
+      command_name: "turn_light",
+      paras: {
+        Light_Status: 1
+      }
+    },
+    null,
+    2
+  );
+}
+
+function syncPayloadServiceId() {
+  if (!publishPayloadInput) return;
+  const serviceId = String(currentConfig?.serviceId || "").trim();
+  if (!serviceId) return;
+
+  const parsed = parseJsonText(publishPayloadInput.value || "");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  if (parsed.service_id === serviceId) return;
+
+  parsed.service_id = serviceId;
+  publishPayloadInput.value = JSON.stringify(parsed, null, 2);
+}
+
+function applyQuickInputHint() {
+  if (!quickPropertyInput || !quickValueInput) return;
+  const commandName = String(quickPropertyInput.value || "").trim();
+
+  if (commandName === "blink_light" || commandName === "blink_relay") {
+    quickValueInput.placeholder = '{"blink_count":3,"on_ms":200,"off_ms":200}';
+    return;
+  }
+
+  quickValueInput.placeholder = "0 或 1";
+}
+
+function parseBlinkQuickInput(valueText, commandName) {
+  const text = String(valueText || "").trim();
+  if (!text) {
+    throw new Error(`${commandName} 请输入参数：{"blink_count":3,"on_ms":200,"off_ms":200}`);
+  }
+
+  let source = null;
+  const parsed = parseJsonText(text);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    source = parsed;
+  } else {
+    const nums = text
+      .split(/[\s,]+/)
+      .map((item) => Number(item))
+      .filter(Number.isFinite);
+    if (nums.length >= 3) {
+      source = {
+        blink_count: nums[0],
+        on_ms: nums[1],
+        off_ms: nums[2]
+      };
+    }
+  }
+
+  if (!source) {
+    throw new Error(`${commandName} 参数格式错误，请输入 JSON 或 3 个数字。`);
+  }
+
+  const blinkCount = Math.trunc(Number(source.blink_count));
+  const onMs = Math.trunc(Number(source.on_ms));
+  const offMs = Math.trunc(Number(source.off_ms));
+
+  if (!Number.isFinite(blinkCount) || !Number.isFinite(onMs) || !Number.isFinite(offMs)) {
+    throw new Error(`${commandName} 参数必须是数字。`);
+  }
+  if (blinkCount <= 0 || onMs <= 0 || offMs <= 0) {
+    throw new Error(`${commandName} 参数必须大于 0。`);
+  }
+
+  return {
+    blink_count: blinkCount,
+    on_ms: onMs,
+    off_ms: offMs
+  };
 }
 
 function renderSubscriptions(topics) {
@@ -630,26 +737,6 @@ function renderThingModel(modelData) {
     }
   }
 
-  if (quickPropertyInput) {
-    quickPropertyInput.innerHTML = "";
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = "选择属性";
-    quickPropertyInput.appendChild(placeholder);
-
-    const writable = thingModelProperties.filter((item) => {
-      const mode = String(item?.rwMode || "").toLowerCase();
-      if (!mode) return true;
-      return mode.includes("w");
-    });
-
-    for (const p of writable) {
-      const option = document.createElement("option");
-      option.value = p.identifier;
-      option.textContent = `${p.name} (${p.identifier})`;
-      quickPropertyInput.appendChild(option);
-    }
-  }
 }
 
 function renderPropertyState(data) {
@@ -749,7 +836,7 @@ function updateStatus(data) {
 
   const transport = data?.config?.transport || data?.defaults?.transport || "";
   const commandOnly = transport === "openapi_command_only";
-  const localMqttEnabled = Boolean(data?.defaults?.enableLocalMqtt);
+  const subscribeEnabled = false;
 
   if (statusPill && connectionValue) {
     if (data?.connecting) {
@@ -759,7 +846,7 @@ function updateStatus(data) {
     } else if (data?.connected) {
       statusPill.className = "status-pill status-online";
       statusPill.textContent = commandOnly ? "在线(命令)" : "在线";
-      connectionValue.textContent = commandOnly ? "命令模式" : "MQTT";
+      connectionValue.textContent = commandOnly ? "华为命令通道" : "非命令通道";
     } else {
       statusPill.className = "status-pill status-offline";
       statusPill.textContent = "离线";
@@ -769,7 +856,9 @@ function updateStatus(data) {
 
   if (envModeHint) {
     if (data?.connected && data?.config) {
-      envModeHint.textContent = `${data.config.productKey}/${data.config.deviceName}`;
+      const product = data.config.productId || data.config.productKey || "-";
+      const device = data.config.deviceId || data.config.deviceName || "-";
+      envModeHint.textContent = `${product}/${device}`;
     } else if (data?.defaults?.hasEnvTriplet) {
       envModeHint.textContent = ".env 已就绪";
     } else {
@@ -782,13 +871,13 @@ function updateStatus(data) {
   }
 
   if (subTopicInput && subQosInput && subForm && unsubBtn) {
-    subTopicInput.disabled = !localMqttEnabled;
-    subQosInput.disabled = !localMqttEnabled;
+    subTopicInput.disabled = !subscribeEnabled;
+    subQosInput.disabled = !subscribeEnabled;
     const subBtn = subForm.querySelector('button[type="submit"]');
-    if (subBtn) subBtn.disabled = !localMqttEnabled;
-    unsubBtn.disabled = !localMqttEnabled;
+    if (subBtn) subBtn.disabled = !subscribeEnabled;
+    unsubBtn.disabled = !subscribeEnabled;
 
-    if (!localMqttEnabled) {
+    if (!subscribeEnabled) {
       if (subscriptionPanel) subscriptionPanel.hidden = true;
       if (debugModeHint) debugModeHint.textContent = "命令模式下已隐藏订阅面板";
       subTopicInput.placeholder = "订阅已禁用";
@@ -819,21 +908,20 @@ function updateStatus(data) {
 
   renderSubscriptions(data?.subscriptions || []);
   fillDefaultTopic();
+  syncPayloadServiceId();
 }
 
 function applyPropertyToPayload() {
-  const identifier = String(quickPropertyInput?.value || "").trim();
-  if (!identifier) {
-    pushLine(logList, "请先选择属性", "warn");
+  const commandName = String(quickPropertyInput?.value || "").trim();
+  if (!commandName) {
+    pushLine(logList, "请先选择命令", "warn");
     return;
   }
 
-  const value = parseSmartValue(quickValueInput?.value || "");
   let payloadObj = {
-    id: String(Date.now()),
-    version: "1.0",
-    params: {},
-    method: "thing.service.property.set"
+    service_id: "Rets2",
+    command_name: commandName,
+    paras: {}
   };
 
   const parsed = parseJsonText(publishPayloadInput?.value || "");
@@ -841,15 +929,38 @@ function applyPropertyToPayload() {
     payloadObj = {
       ...payloadObj,
       ...parsed,
-      params:
-        parsed.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
-          ? parsed.params
+      paras:
+        parsed.paras && typeof parsed.paras === "object" && !Array.isArray(parsed.paras)
+          ? parsed.paras
           : {}
     };
   }
 
-  payloadObj.method = "thing.service.property.set";
-  payloadObj.params[identifier] = value;
+  const valueText = String(quickValueInput?.value || "").trim();
+  let normalizedParas = {};
+
+  if (commandName === "turn_light" || commandName === "turn_relay") {
+    if (!valueText) {
+      pushLine(logList, "turn_light / turn_relay 请输入 0 或 1", "warn");
+      return;
+    }
+    const normalizedValue = Number(parseSmartValue(valueText)) > 0 ? 1 : 0;
+    const paramKey = commandName === "turn_light" ? "Light_Status" : "Relay_Status";
+    normalizedParas = { [paramKey]: normalizedValue };
+  } else if (commandName === "blink_light" || commandName === "blink_relay") {
+    try {
+      normalizedParas = parseBlinkQuickInput(valueText, commandName);
+    } catch (error) {
+      pushLine(logList, error.message, "warn");
+      return;
+    }
+  } else {
+    pushLine(logList, `暂不支持命令: ${commandName}`, "warn");
+    return;
+  }
+
+  payloadObj.command_name = commandName;
+  payloadObj.paras = normalizedParas;
   if (publishPayloadInput) {
     publishPayloadInput.value = JSON.stringify(payloadObj, null, 2);
   }
@@ -917,6 +1028,10 @@ if (applyPropertyBtn) {
   applyPropertyBtn.addEventListener("click", applyPropertyToPayload);
 }
 
+if (quickPropertyInput) {
+  quickPropertyInput.addEventListener("change", applyQuickInputHint);
+}
+
 if (publishForm) {
   publishForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -937,7 +1052,7 @@ if (publishForm) {
         publishPayloadInput.value = JSON.stringify(result.normalizedPayload, null, 2);
       }
 
-      const route = result.route || "mqtt_raw";
+      const route = result.route || "huawei_create_command";
       pushLine(logList, `发布成功 [${route}]`, "success");
       if (Array.isArray(result.warnings)) {
         for (const warning of result.warnings) {
@@ -1004,14 +1119,9 @@ socket.on("log", (event) => {
   pushLine(logList, `[${event.level}] ${event.message}${extra}`, css, event.timestamp);
 });
 
-socket.on("mqtt_message", (event) => {
-  const body = event.jsonPayload ? safeJson(event.jsonPayload) : event.payload;
-  pushLine(messageList, `${event.topic}\n${body}`, "success", event.timestamp);
-});
-
 socket.on("published", (event) => {
   recordPublishPoint();
-  pushLine(logList, `已发布 ${event.topic} [${event.route || "mqtt_raw"}]`, "success", event.timestamp);
+  pushLine(logList, `已发布 ${event.topic} [${event.route || "huawei_create_command"}]`, "success", event.timestamp);
 });
 
 window.addEventListener("resize", () => {
@@ -1034,6 +1144,8 @@ async function init() {
     drawSoilChart();
     updateSoilKpis();
     refreshMiniCharts();
+    renderQuickCommandOptions();
+    fillDefaultCommandPayload();
 
     const status = await api("/api/status");
     updateStatus(status);

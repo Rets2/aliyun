@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="${APP_NAME:-aliyun-iot-web}"
+APP_NAME="${APP_NAME:-huawei-iotda-web}"
 APP_DIR="${APP_DIR:-/opt/${APP_NAME}}"
 REPO_URL="${REPO_URL:-https://github.com/Rets2/aliyun.git}"
 BRANCH="${BRANCH:-main}"
-SITE_CONF_NAME="${SITE_CONF_NAME:-aliyun-iot-web.conf}"
+SITE_CONF_NAME="${SITE_CONF_NAME:-huawei-iotda-web.conf}"
 
 echo "[1/8] Install system packages..."
 sudo apt-get update
@@ -50,7 +50,7 @@ if [[ ! -f "${APP_DIR}/.env" ]]; then
 fi
 
 echo "[7/8] Configure Nginx reverse proxy..."
-sudo cp "${APP_DIR}/deploy/ecs/nginx.aliyun-iot-web.conf" "/etc/nginx/sites-available/${SITE_CONF_NAME}"
+sudo cp "${APP_DIR}/deploy/ecs/nginx.huawei-iotda-web.conf" "/etc/nginx/sites-available/${SITE_CONF_NAME}"
 sudo ln -sfn "/etc/nginx/sites-available/${SITE_CONF_NAME}" "/etc/nginx/sites-enabled/${SITE_CONF_NAME}"
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
@@ -69,6 +69,6 @@ sudo env PATH="$PATH:/usr/bin" pm2 startup systemd -u "${USER}" --hp "${HOME}" |
 echo ""
 echo "Bootstrap complete."
 echo "Next steps:"
-echo "1) Edit ${APP_DIR}/.env and fill all ALIYUN_* variables."
-echo "2) Restart app: pm2 restart aliyun-iot-web --update-env"
+echo "1) Edit ${APP_DIR}/.env and fill all HWCLOUD_* variables."
+echo "2) Restart app: pm2 restart huawei-iotda-web --update-env"
 echo "3) Open: http://<your-ecs-public-ip>"

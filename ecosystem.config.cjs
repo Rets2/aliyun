@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "aliyun-iot-web",
+      name: "huawei-iotda-web",
       script: "server.js",
       cwd: process.cwd(),
       exec_mode: "fork",

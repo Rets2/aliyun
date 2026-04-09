@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: aliyun-iot-web-console
+    name: huawei-iotda-web-console
     runtime: node
     plan: starter
     buildCommand: npm ci
@@ -11,26 +11,26 @@ services:
         value: production
       - key: PORT
         sync: false
-      - key: ALIYUN_PRODUCT_KEY
+      - key: HWCLOUD_REGION_ID
         sync: false
-      - key: ALIYUN_DEVICE_NAME
+      - key: HWCLOUD_ENDPOINT
         sync: false
-      - key: ALIYUN_DEVICE_SECRET
+      - key: HWCLOUD_PROJECT_ID
         sync: false
-      - key: ALIYUN_REGION_ID
+      - key: HWCLOUD_AK
         sync: false
-      - key: ALIYUN_CLIENT_ID
+      - key: HWCLOUD_SK
         sync: false
-      - key: ALIYUN_ACCESS_KEY_ID
+      - key: HWCLOUD_DEVICE_ID
         sync: false
-      - key: ALIYUN_ACCESS_KEY_SECRET
+      - key: HWCLOUD_PRODUCT_ID
         sync: false
-      - key: ALIYUN_IOT_INSTANCE_ID
+      - key: HWCLOUD_SERVICE_ID
+        value: "Rets2"
+      - key: HWCLOUD_INSTANCE_ID
         sync: false
-      - key: ENABLE_LOCAL_MQTT
-        value: "false"
-      - key: ALLOW_CLOUD_ROUTE_MQTT_FALLBACK
-        value: "false"
+      - key: HWCLOUD_APP_ID
+        sync: false
       - key: TARGET_ONLINE_WAIT_MS
         value: "15000"
       - key: TARGET_ONLINE_POLL_MS

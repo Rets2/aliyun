@@ -1,12 +1,11 @@
-﻿const crypto = require("crypto");
-const http = require("http");
+﻿const http = require("http");
 const path = require("path");
 
 const dotenv = require("dotenv");
 const express = require("express");
-const mqtt = require("mqtt");
-const POPCore = require("@alicloud/pop-core");
 const { Server } = require("socket.io");
+const { v5: IotdaV5 } = require("@huaweicloud/huaweicloud-sdk-iotda");
+const { BasicCredentials } = require("@huaweicloud/huaweicloud-sdk-core/auth/BasicCredentials");
 
 dotenv.config();
 
@@ -15,44 +14,36 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = Number(process.env.PORT || 3000);
-const DEFAULT_REGION = process.env.ALIYUN_REGION_ID || "cn-shanghai";
+const DEFAULT_REGION =
+  String(process.env.HWCLOUD_REGION_ID || process.env.HUAWEI_IOT_REGION_ID || "cn-east-3").trim() || "cn-east-3";
+const DEFAULT_SERVICE_ID =
+  String(process.env.HWCLOUD_SERVICE_ID || process.env.HUAWEI_IOT_SERVICE_ID || "Rets2").trim() || "Rets2";
 
-const ENV_TRIPLET = {
-  productKey: String(process.env.ALIYUN_PRODUCT_KEY || "").trim(),
-  deviceName: String(process.env.ALIYUN_DEVICE_NAME || "").trim(),
-  deviceSecret: String(process.env.ALIYUN_DEVICE_SECRET || "").trim()
-};
-
-const HAS_ENV_TRIPLET =
-  Boolean(ENV_TRIPLET.productKey) &&
-  Boolean(ENV_TRIPLET.deviceName) &&
-  Boolean(ENV_TRIPLET.deviceSecret);
-
-const AUTO_CONNECT_ON_START =
-  String(process.env.AUTO_CONNECT_ON_START || "false") === "true";
-
-const OPENAPI_CONFIG = {
-  accessKeyId: String(process.env.ALIYUN_ACCESS_KEY_ID || "").trim(),
-  accessKeySecret: String(process.env.ALIYUN_ACCESS_KEY_SECRET || "").trim(),
-  iotInstanceId: String(process.env.ALIYUN_IOT_INSTANCE_ID || "").trim() || null
-};
-
-const ENABLE_LOCAL_MQTT =
-  String(process.env.ENABLE_LOCAL_MQTT || "false").toLowerCase() === "true";
-
-const ALLOW_CLOUD_ROUTE_MQTT_FALLBACK =
-  String(process.env.ALLOW_CLOUD_ROUTE_MQTT_FALLBACK || "false").toLowerCase() === "true";
-
-const CALLBACK_COMPATIBLE_IDENTIFIERS = new Set(["identify_check", "Light_Status", "Door_Status"]);
 const TARGET_ONLINE_WAIT_MS = Number(process.env.TARGET_ONLINE_WAIT_MS || 15000);
 const TARGET_ONLINE_POLL_MS = Number(process.env.TARGET_ONLINE_POLL_MS || 1500);
 const STRICT_TARGET_ONLINE_CHECK =
   String(process.env.STRICT_TARGET_ONLINE_CHECK || "false").toLowerCase() === "true";
-const CLOUD_DISPATCH_RETRY_ATTEMPTS = Number(process.env.CLOUD_DISPATCH_RETRY_ATTEMPTS || 3);
+const CLOUD_DISPATCH_RETRY_ATTEMPTS = Math.max(1, Number(process.env.CLOUD_DISPATCH_RETRY_ATTEMPTS || 3));
 const CLOUD_DISPATCH_RETRY_INTERVAL_MS = Number(process.env.CLOUD_DISPATCH_RETRY_INTERVAL_MS || 2000);
-const PROPERTY_POLL_INTERVAL_MS = Math.max(2000, Number(process.env.PROPERTY_POLL_INTERVAL_MS || 2000));
+
 const PROPERTY_POLL_ON_CONNECT =
   String(process.env.PROPERTY_POLL_ON_CONNECT || "true").toLowerCase() === "true";
+const PROPERTY_POLL_INTERVAL_MS = Math.max(2000, Number(process.env.PROPERTY_POLL_INTERVAL_MS || 2000));
+const AUTO_CONNECT_ON_START =
+  String(process.env.AUTO_CONNECT_ON_START || "false").toLowerCase() === "true";
+
+const ENV_DEFAULTS = {
+  regionId: pickFirstNonEmpty(process.env.HWCLOUD_REGION_ID, process.env.HUAWEI_IOT_REGION_ID, DEFAULT_REGION),
+  endpoint: pickFirstNonEmpty(process.env.HWCLOUD_ENDPOINT, process.env.HUAWEI_IOT_ENDPOINT),
+  projectId: pickFirstNonEmpty(process.env.HWCLOUD_PROJECT_ID, process.env.HUAWEI_IOT_PROJECT_ID),
+  ak: pickFirstNonEmpty(process.env.HWCLOUD_AK, process.env.HUAWEI_IOT_AK),
+  sk: pickFirstNonEmpty(process.env.HWCLOUD_SK, process.env.HUAWEI_IOT_SK),
+  deviceId: pickFirstNonEmpty(process.env.HWCLOUD_DEVICE_ID, process.env.HUAWEI_IOT_DEVICE_ID),
+  productId: pickFirstNonEmpty(process.env.HWCLOUD_PRODUCT_ID, process.env.HUAWEI_IOT_PRODUCT_ID),
+  serviceId: pickFirstNonEmpty(process.env.HWCLOUD_SERVICE_ID, process.env.HUAWEI_IOT_SERVICE_ID, DEFAULT_SERVICE_ID),
+  instanceId: pickFirstNonEmpty(process.env.HWCLOUD_INSTANCE_ID, process.env.HUAWEI_IOT_INSTANCE_ID) || null,
+  appId: pickFirstNonEmpty(process.env.HWCLOUD_APP_ID, process.env.HUAWEI_IOT_APP_ID) || null
+};
 
 const state = {
   client: null,
@@ -81,6 +72,8 @@ const state = {
 
 let propertyPollTimer = null;
 let propertyPollRunning = false;
+let cachedClientKey = "";
+let cachedIotdaClient = null;
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -98,14 +91,42 @@ function pickFirstNonEmpty(...values) {
   return "";
 }
 
+function readField(source, ...keys) {
+  if (!source || typeof source !== "object") return undefined;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
+      return source[key];
+    }
+  }
+  return undefined;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasHuaweiCredentials(config = ENV_DEFAULTS) {
+  return Boolean(config.projectId) && Boolean(config.ak) && Boolean(config.sk);
+}
+
+function hasHuaweiDeviceConfig(config = ENV_DEFAULTS) {
+  return Boolean(config.deviceId) && Boolean(config.productId);
+}
+
 function redactConfig(config) {
   if (!config) return null;
   return {
-    productKey: config.productKey,
-    deviceName: config.deviceName,
+    provider: "huawei_iotda",
     regionId: config.regionId,
-    clientId: config.clientId,
-    transport: ENABLE_LOCAL_MQTT ? "mqtt://:1883 (non-TLS)" : "openapi_command_only"
+    endpoint: config.endpoint || null,
+    projectId: config.projectId,
+    productId: config.productId,
+    deviceId: config.deviceId,
+    serviceId: config.serviceId,
+    productKey: config.productId,
+    deviceName: config.deviceId,
+    clientId: null,
+    transport: "openapi_command_only"
   };
 }
 
@@ -166,678 +187,195 @@ function emitPropertyStateEvent(trigger = "unknown") {
 }
 
 function emitLog(level, message, extra = undefined) {
-  const payload = {
-    level,
-    message,
-    extra,
-    timestamp: nowIso()
-  };
+  const payload = { level, message, extra, timestamp: nowIso() };
   const printer = level === "error" ? console.error : console.log;
   printer(`[${payload.timestamp}] [${level}] ${message}`, extra || "");
   io.emit("log", payload);
 }
 
-function classifyMqttError(error) {
-  const message = String(error?.message || "").toLowerCase();
-  const code = String(error?.code || "").toLowerCase();
-  const merged = `${code} ${message}`;
-
-  if (merged.includes("unacceptable protocol version") || merged.includes("connack")) {
-    return {
-      kind: "protocol_or_auth",
-      hint: "Check securemode/signmethod, triplet, and region."
-    };
-  }
-
-  if (
-    merged.includes("not authorized") ||
-    merged.includes("username or password is malformed") ||
-    merged.includes("identifier rejected")
-  ) {
-    return {
-      kind: "auth",
-      hint: "Check ProductKey, DeviceName, and DeviceSecret."
-    };
-  }
-
-  if (["econnrefused", "econnreset", "etimedout", "enotfound"].some((key) => merged.includes(key))) {
-    return {
-      kind: "network",
-      hint: "Check region endpoint, firewall, and port 1883 reachability."
-    };
-  }
-
-  return {
-    kind: "unknown",
-    hint: "Check MQTT TCP non-TLS access policy."
-  };
-}
-
-function formatOpenApiError(error) {
-  const rawCandidates = [
-    error?.data?.Message,
-    error?.data?.message,
-    error?.message,
-    error?.msg,
-    error?.Code,
-    error?.code
-  ];
-  let rawMessage =
-    rawCandidates.find((item) => typeof item === "string" && item.trim() && item.trim() !== "undefined") ||
-    "OpenAPI request failed";
-
-  const code = error?.data?.Code || error?.code || error?.Code || null;
-  const requestId = error?.data?.RequestId || error?.requestId || null;
-
-  if (typeof rawMessage === "string" && rawMessage.trim().startsWith("undefined")) {
-    rawMessage = code || "OpenAPI request failed";
-  }
-
-  let message = rawMessage;
-  if (code === "iot.Sre.IotInstanceNotFound") {
-    message = "IotInstanceId is invalid or mismatched with region. Check ALIYUN_IOT_INSTANCE_ID.";
-  } else if (code === "iot.prod.NotExistedProduct") {
-    message = "ProductKey not found under current account/region/instance. Check product region and AK/SK scope.";
-  } else if (code === "iot.messagebroker.OFFLINE") {
-    message = "Target device is offline from cloud perspective.";
-  }
-
-  return {
-    message,
-    rawMessage,
-    code,
-    requestId
-  };
-}
-
-function makeOpenApiClient(regionId) {
-  const endpoint = `https://iot.${regionId}.aliyuncs.com`;
-  return new POPCore({
-    accessKeyId: OPENAPI_CONFIG.accessKeyId,
-    accessKeySecret: OPENAPI_CONFIG.accessKeySecret,
-    endpoint,
-    apiVersion: "2018-01-20"
-  });
-}
-
-function hasOpenApiCredentials() {
-  return Boolean(OPENAPI_CONFIG.accessKeyId) && Boolean(OPENAPI_CONFIG.accessKeySecret);
-}
-
-function canRetryWithoutInstance(errorCode) {
-  const code = String(errorCode || "");
-  return ["iot.Sre.IotInstanceNotFound", "iot.auth.IotInstanceNotFound", "iot.auth.InvalidIotInstanceId"].includes(
-    code
-  );
-}
-
-async function openApiRequestWithInstanceFallback(action, baseParamsBuilder, requestOptions = { method: "POST" }) {
-  if (!hasOpenApiCredentials()) {
-    throw new Error("OpenAPI credentials are not configured.");
-  }
-
-  const client = makeOpenApiClient(state.config?.regionId || DEFAULT_REGION);
-  const attempts = [];
-  if (OPENAPI_CONFIG.iotInstanceId) {
-    attempts.push({ iotInstanceId: OPENAPI_CONFIG.iotInstanceId, label: "with_instance" });
-  }
-  attempts.push({ iotInstanceId: null, label: "without_instance" });
-
-  let lastError = null;
-
-  for (const attempt of attempts) {
-    const params = baseParamsBuilder();
-    if (attempt.iotInstanceId) {
-      params.IotInstanceId = attempt.iotInstanceId;
-    }
-
-    try {
-      const response = await client.request(action, params, requestOptions);
-      return { response, attempt: attempt.label };
-    } catch (error) {
-      const formatted = formatOpenApiError(error);
-      lastError = formatted;
-      emitLog("info", `${action} failed, retry strategy ongoing.`, {
-        attempt: attempt.label,
-        reason: formatted.message,
-        code: formatted.code,
-        requestId: formatted.requestId
-      });
-
-      if (attempt.label === "with_instance" && !canRetryWithoutInstance(formatted.code)) {
-        const err = new Error(formatted.message || `${action} failed.`);
-        err.code = formatted.code || null;
-        err.requestId = formatted.requestId || null;
-        err.rawMessage = formatted.rawMessage || null;
-        throw err;
-      }
-    }
-  }
-
-  const err = new Error(lastError?.message || `${action} failed.`);
-  if (lastError?.code) err.code = lastError.code;
-  if (lastError?.requestId) err.requestId = lastError.requestId;
-  if (lastError?.rawMessage) err.rawMessage = lastError.rawMessage;
-  throw err;
-}
-
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-function isLocalMqttUsingSameDevice(productKey, deviceName) {
-  if (!state.connected || !state.client || !state.config) return false;
-  return state.config.productKey === productKey && state.config.deviceName === deviceName;
-}
-
-async function releaseLocalSessionIfSameDevice(productKey, deviceName) {
-  if (!isLocalMqttUsingSameDevice(productKey, deviceName)) {
-    return false;
-  }
-
-  emitLog("warn", "Local MQTT session is using the target device. Disconnecting local session before command dispatch.", {
-    productKey,
-    deviceName
-  });
-  await disconnectClient("avoid_device_session_conflict");
-  await delay(1200);
-  return true;
-}
-
-async function queryTargetDeviceStatus(productKey, deviceName) {
-  const { response } = await openApiRequestWithInstanceFallback("GetDeviceStatus", () => ({
-    ProductKey: productKey,
-    DeviceName: deviceName
-  }));
-
-  const status = String(response?.Data?.Status || "UNKNOWN").toUpperCase();
-  state.targetDevice.status = status;
-  state.targetDevice.updatedAt = nowIso();
-  emitStatus();
+function buildRuntimeConfig(configInput = {}) {
   return {
-    status,
-    detail: response?.Data || null
+    regionId: pickFirstNonEmpty(configInput.regionId, ENV_DEFAULTS.regionId, DEFAULT_REGION),
+    endpoint: pickFirstNonEmpty(configInput.endpoint, ENV_DEFAULTS.endpoint),
+    projectId: pickFirstNonEmpty(configInput.projectId, ENV_DEFAULTS.projectId),
+    ak: pickFirstNonEmpty(configInput.ak, ENV_DEFAULTS.ak),
+    sk: pickFirstNonEmpty(configInput.sk, ENV_DEFAULTS.sk),
+    deviceId: pickFirstNonEmpty(configInput.deviceId, ENV_DEFAULTS.deviceId),
+    productId: pickFirstNonEmpty(configInput.productId, ENV_DEFAULTS.productId),
+    serviceId: pickFirstNonEmpty(configInput.serviceId, ENV_DEFAULTS.serviceId, DEFAULT_SERVICE_ID),
+    instanceId: pickFirstNonEmpty(configInput.instanceId, ENV_DEFAULTS.instanceId) || null,
+    appId: pickFirstNonEmpty(configInput.appId, ENV_DEFAULTS.appId) || null
   };
 }
 
-async function waitForTargetOnline(productKey, deviceName, options = {}) {
-  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : TARGET_ONLINE_WAIT_MS;
-  const pollMs = Number.isFinite(Number(options.pollMs)) ? Number(options.pollMs) : TARGET_ONLINE_POLL_MS;
-  const strict = options.strict === undefined ? STRICT_TARGET_ONLINE_CHECK : Boolean(options.strict);
-  const releasedLocalSession = Boolean(options.releasedLocalSession);
-  const initialDelayMs = releasedLocalSession ? Math.min(4000, Math.max(1000, pollMs * 2)) : 0;
-
-  const startedAt = Date.now();
-  let lastStatus = "UNKNOWN";
-  let attempts = 0;
-  let consecutiveOnline = 0;
-
-  if (initialDelayMs > 0) {
-    await delay(initialDelayMs);
-  }
-
-  while (Date.now() - startedAt <= timeoutMs) {
-    attempts += 1;
-    try {
-      const statusInfo = await queryTargetDeviceStatus(productKey, deviceName);
-      lastStatus = statusInfo.status;
-      if (lastStatus === "ONLINE") {
-        consecutiveOnline += 1;
-        const requiredConsecutiveOnline = releasedLocalSession ? 2 : 1;
-        if (consecutiveOnline >= requiredConsecutiveOnline) {
-          return {
-            online: true,
-            status: lastStatus,
-            attempts,
-            waitedMs: Date.now() - startedAt
-          };
-        }
-      } else {
-        consecutiveOnline = 0;
-      }
-    } catch (error) {
-      consecutiveOnline = 0;
-      emitLog("warn", "GetDeviceStatus polling failed.", {
-        productKey,
-        deviceName,
-        reason: error.message
-      });
-    }
-
-    await delay(pollMs);
-  }
-
-  if (strict) {
-    throw new Error(`Target device ${productKey}/${deviceName} is ${lastStatus} after waiting ${timeoutMs}ms.`);
-  }
-
-  return {
-    online: false,
-    status: lastStatus,
-    attempts,
-    waitedMs: Date.now() - startedAt
-  };
-}
-
-function isOfflineDispatchError(error) {
-  const code = String(error?.code || "");
-  const message = String(error?.message || "").toLowerCase();
-  return code === "iot.messagebroker.OFFLINE" || (message.includes("target device") && message.includes("offline"));
-}
-
-async function requestWithOfflineRetry(actionName, runner, context = {}) {
-  const attemptsLimit = Math.max(1, Number.isFinite(CLOUD_DISPATCH_RETRY_ATTEMPTS) ? CLOUD_DISPATCH_RETRY_ATTEMPTS : 1);
-  let lastError = null;
-
-  for (let i = 1; i <= attemptsLimit; i += 1) {
-    try {
-      const result = await runner();
-      return { result, attempts: i };
-    } catch (error) {
-      lastError = error;
-      if (!(isOfflineDispatchError(error) && i < attemptsLimit)) {
-        throw error;
-      }
-
-      emitLog("warn", `${actionName} returned OFFLINE, retrying...`, {
-        attempt: i,
-        nextAttemptInMs: CLOUD_DISPATCH_RETRY_INTERVAL_MS,
-        ...context
-      });
-      await delay(CLOUD_DISPATCH_RETRY_INTERVAL_MS);
-    }
-  }
-
-  throw lastError || new Error(`${actionName} failed.`);
-}
-
-function normalizeTopicInput(rawTopic, config = state.config) {
-  let topic = String(rawTopic || "").trim();
-  if (!topic) return "";
-
-  if (topic.startsWith("sys/")) {
-    topic = `/${topic}`;
-  }
-
-  if (topic.startsWith("/user/") && config?.productKey && config?.deviceName) {
-    return `/${config.productKey}/${config.deviceName}${topic}`;
-  }
-
-  if (topic.startsWith("/")) {
-    return topic;
-  }
-
-  if (!config?.productKey || !config?.deviceName) {
-    return topic;
-  }
-
-  if (topic.startsWith("user/")) {
-    return `/${config.productKey}/${config.deviceName}/${topic}`;
-  }
-
-  if (!topic.includes("/")) {
-    return `/${config.productKey}/${config.deviceName}/user/${topic}`;
-  }
-
-  return topic;
-}
-
-function isSystemTopic(topic) {
-  return String(topic || "").startsWith("/sys/");
-}
-
-function parseTopicRoute(topic) {
-  const propertySetMatch = topic.match(
-    /^\/sys\/([^/]+)\/([^/]+)\/thing\/service\/property\/set$/
-  );
-  if (propertySetMatch) {
-    return {
-      type: "property_set",
-      productKey: propertySetMatch[1],
-      deviceName: propertySetMatch[2]
-    };
-  }
-
-  const serviceMatch = topic.match(/^\/sys\/([^/]+)\/([^/]+)\/thing\/service\/([^/]+)$/);
-  if (serviceMatch) {
-    return {
-      type: "service_invoke",
-      productKey: serviceMatch[1],
-      deviceName: serviceMatch[2],
-      identifier: serviceMatch[3]
-    };
-  }
-
-  const customMatch = topic.match(/^\/([^/]+)\/([^/]+)\/user\/(.+)$/);
-  if (customMatch) {
-    return {
-      type: "custom_pub",
-      productKey: customMatch[1],
-      deviceName: customMatch[2]
-    };
-  }
-
-  return { type: "mqtt_raw" };
-}
-
-function parsePayloadObject(payload) {
-  if (payload === null || payload === undefined) return null;
-  if (typeof payload === "object") return payload;
-  if (typeof payload !== "string") return null;
-  const text = payload.trim();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch (_error) {
-    return null;
-  }
-}
-
-function extractPropertyItems(payload) {
-  const obj = parsePayloadObject(payload);
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
-
-  let source = null;
-  if (obj.params && typeof obj.params === "object" && !Array.isArray(obj.params)) {
-    source = obj.params;
-  } else {
-    source = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (["id", "version", "method", "sys"].includes(key)) continue;
-      source[key] = value;
-    }
-  }
-
-  const items = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      Object.prototype.hasOwnProperty.call(value, "value")
-    ) {
-      items[key] = value.value;
-    } else {
-      items[key] = value;
-    }
-  }
-  return items;
-}
-
-function extractServiceArgs(payload) {
-  const obj = parsePayloadObject(payload);
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
-
-  if (obj.params && typeof obj.params === "object" && !Array.isArray(obj.params)) {
-    return obj.params;
-  }
-  if (obj.args && typeof obj.args === "object" && !Array.isArray(obj.args)) {
-    return obj.args;
-  }
-  if (obj.Args && typeof obj.Args === "object" && !Array.isArray(obj.Args)) {
-    return obj.Args;
-  }
-  return {};
-}
-
-function buildAlinkEnvelope(existingObj, method, params) {
-  const envelope = {
-    id: String(existingObj?.id || Date.now()),
-    version: String(existingObj?.version || "1.0"),
-    params: params && typeof params === "object" && !Array.isArray(params) ? params : {},
-    method
-  };
-
-  if (existingObj?.sys && typeof existingObj.sys === "object" && !Array.isArray(existingObj.sys)) {
-    envelope.sys = existingObj.sys;
-  }
-
-  return envelope;
-}
-
-function coerceValueByThingDataType(identifier, value) {
-  const hasThingModel = state.thingModel.properties.length > 0;
-  const property = state.thingModel.properties.find((item) => item.identifier === identifier);
-  if (!property) {
-    if (hasThingModel) {
-      throw new Error(`Property ${identifier} is not in current thing model.`);
-    }
-    return value;
-  }
-
-  if (property.rwMode && !String(property.rwMode).toLowerCase().includes("w")) {
-    throw new Error(`Property ${identifier} is read-only and cannot be set.`);
-  }
-
-  const type = String(property?.dataType || "").toLowerCase();
-  if (!type) return value;
-
-  if (type === "bool" || type === "boolean") {
-    if (typeof value === "boolean") return value ? 1 : 0;
-    if (value === 1 || value === 0) return value;
-    if (typeof value === "string") {
-      const text = value.trim().toLowerCase();
-      if (text === "true" || text === "1") return 1;
-      if (text === "false" || text === "0") return 0;
-    }
-    throw new Error(`Property ${identifier} expects bool (0/1 or true/false).`);
-  }
-
-  if (["int", "float", "double", "long"].includes(type)) {
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-    if (typeof value === "boolean") return value ? 1 : 0;
-    if (typeof value === "string" && value.trim() !== "") {
-      const n = Number(value);
-      if (Number.isFinite(n)) return n;
-    }
-    throw new Error(`Property ${identifier} expects numeric type ${type}.`);
-  }
-
-  if (type === "text" || type === "date") {
-    if (typeof value === "string") return value;
-    return String(value);
-  }
-
-  if (type === "struct") {
-    if (value && typeof value === "object" && !Array.isArray(value)) return value;
-    throw new Error(`Property ${identifier} expects object type struct.`);
-  }
-
-  if (type === "array") {
-    if (Array.isArray(value)) return value;
-    throw new Error(`Property ${identifier} expects array.`);
-  }
-
-  return value;
-}
-
-function coercePropertyItemsByThingModel(items) {
-  const normalized = {};
-  for (const [key, value] of Object.entries(items || {})) {
-    normalized[key] = coerceValueByThingDataType(key, value);
-  }
-  return normalized;
-}
-
-function validateCallbackCompatibleItems(items) {
-  const warnings = [];
-  for (const key of Object.keys(items || {})) {
-    if (!CALLBACK_COMPATIBLE_IDENTIFIERS.has(key)) {
-      throw new Error(
-        `Property ${key} is not handled by current device callback. Supported keys: identify_check, Light_Status, Door_Status.`
-      );
-    }
-    if (key === "identify_check") {
-      warnings.push("identify_check is handled as warning in device callback and does not drive actuator state.");
-    }
-  }
-  return warnings;
-}
-
-function normalizePropertySetPayload(payload) {
-  const obj = parsePayloadObject(payload);
-  const rawItems = extractPropertyItems(payload);
-  const items = coercePropertyItemsByThingModel(rawItems);
-  if (!items || Object.keys(items).length === 0) {
-    throw new Error(
-      "Invalid property-set payload. Use {\"id\":\"1\",\"version\":\"1.0\",\"params\":{\"PropertyIdentifier\":value},\"method\":\"thing.service.property.set\"}."
-    );
-  }
-
-  const callbackWarnings = validateCallbackCompatibleItems(items);
-
-  return {
-    items,
-    envelope: buildAlinkEnvelope(obj, "thing.service.property.set", items),
-    callbackWarnings
-  };
-}
-
-function normalizeServiceInvokePayload(payload, identifier) {
-  const obj = parsePayloadObject(payload);
-  const args = extractServiceArgs(payload);
-  return {
-    args,
-    envelope: buildAlinkEnvelope(obj, `thing.service.${identifier}`, args)
-  };
-}
-
-function normalizeMqttRawPayload(topic, payload) {
-  const route = parseTopicRoute(topic);
-
-  if (route.type === "property_set") {
-    const normalized = normalizePropertySetPayload(payload);
-    return JSON.stringify(normalized.envelope);
-  }
-
-  if (route.type === "service_invoke") {
-    const normalized = normalizeServiceInvokePayload(payload, route.identifier);
-    return JSON.stringify(normalized.envelope);
-  }
-
-  if (payload === undefined || payload === null) return "";
-  if (typeof payload === "string") return payload;
-  return JSON.stringify(payload);
-}
-
-function normalizeProperty(property) {
-  const identifier = property?.identifier || property?.Identifier || null;
-  const name = property?.name || property?.Name || identifier || "unknown";
-  const dataTypeRaw = property?.dataType || property?.DataType || null;
-  const dataTypeValue =
-    typeof dataTypeRaw === "string"
-      ? dataTypeRaw
-      : dataTypeRaw?.type || dataTypeRaw?.Type || "unknown";
-  const dataType = String(dataTypeValue || "unknown").toLowerCase();
-
-  const rwFlag = String(property?.rwFlag || "").toUpperCase();
-  const rwModeFromFlag =
-    rwFlag === "READ_WRITE" ? "rw" : rwFlag === "READ_ONLY" ? "r" : rwFlag === "WRITE_ONLY" ? "w" : null;
-  const rwModeRaw =
-    property?.accessMode ||
-    property?.AccessMode ||
-    property?.rwMode ||
-    property?.RwMode ||
-    property?.mode ||
-    property?.Mode ||
-    rwModeFromFlag ||
+function formatHuaweiError(error) {
+  const code =
+    readField(error, "errorCode", "error_code", "code") ||
+    readField(error?.response, "error_code", "errorCode", "code") ||
+    readField(error?.response?.data, "error_code", "errorCode", "code") ||
     null;
-  const rwMode = rwModeRaw ? String(rwModeRaw).toLowerCase() : null;
-  const required = Boolean(property?.required || property?.Required || false);
+
+  const requestId =
+    readField(error, "requestId", "request_id") ||
+    readField(error?.response, "request_id", "requestId") ||
+    readField(error?.response?.headers || {}, "x-request-id") ||
+    null;
+
+  const rawMessage =
+    readField(error, "errorMsg", "error_msg", "message") ||
+    readField(error?.response, "error_msg", "errorMsg", "message") ||
+    readField(error?.response?.data, "error_msg", "errorMsg", "message") ||
+    "Huawei IoTDA request failed";
+
+  let message = String(rawMessage);
+  const merged = `${String(code || "")} ${message}`.toLowerCase();
+
+  if (merged.includes("project") && merged.includes("not") && merged.includes("found")) {
+    message = "ProjectId 不匹配或区域错误，请检查 HWCLOUD_PROJECT_ID 与 HWCLOUD_REGION_ID。";
+  } else if (merged.includes("signature") || merged.includes("ak") || merged.includes("sk")) {
+    message = "AK/SK 鉴权失败，请检查 HWCLOUD_AK 与 HWCLOUD_SK。";
+  } else if (merged.includes("device") && merged.includes("offline")) {
+    message = "目标设备离线，命令未成功下发。";
+  }
+
+  return {
+    code: code ? String(code) : null,
+    requestId: requestId ? String(requestId) : null,
+    message,
+    rawMessage: String(rawMessage)
+  };
+}
+
+function getIoTdaClient(config = state.config) {
+  if (!config) {
+    throw new Error("Config missing. Connect first.");
+  }
+
+  const cacheKey = `${config.regionId}|${config.endpoint || ""}|${config.projectId}|${config.ak}|${config.sk}`;
+  if (cachedIotdaClient && cacheKey === cachedClientKey) {
+    return cachedIotdaClient;
+  }
+
+  const credentials = new BasicCredentials()
+    .withAk(config.ak)
+    .withSk(config.sk)
+    .withProjectId(config.projectId);
+
+  const builder = IotdaV5.IoTDAClient.newBuilder().withCredential(credentials);
+  if (config.endpoint) {
+    builder.withEndpoint(config.endpoint);
+  } else {
+    const region = IotdaV5.IoTDARegion.valueOf(config.regionId);
+    builder.withRegion(region);
+  }
+  const client = builder.build();
+
+  cachedClientKey = cacheKey;
+  cachedIotdaClient = client;
+  return client;
+}
+
+function coerceBinaryValue(value) {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "number") return value > 0 ? 1 : 0;
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text) return 0;
+  if (["1", "true", "on", "open", "yes"].includes(text)) return 1;
+  if (["0", "false", "off", "close", "closed", "no"].includes(text)) return 0;
+  const parsed = Number(text);
+  if (Number.isFinite(parsed)) return parsed > 0 ? 1 : 0;
+  return 0;
+}
+
+function coerceIntegerValue(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    throw new Error(`${fieldName} is required.`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${fieldName} must be a number.`);
+  }
+
+  return Math.trunc(parsed);
+}
+
+function normalizeDataType(rawType, sampleValue = undefined) {
+  const type = String(rawType || "").trim().toLowerCase();
+  if (type) {
+    if (["int", "long", "float", "double", "number", "decimal"].includes(type)) return "number";
+    if (["bool", "boolean"].includes(type)) return "bool";
+    if (["string", "text", "enum", "date"].includes(type)) return "text";
+    if (["struct", "object", "json"].includes(type)) return "struct";
+    if (type === "array") return "array";
+    return type;
+  }
+
+  if (Array.isArray(sampleValue)) return "array";
+  if (sampleValue && typeof sampleValue === "object") return "struct";
+  if (typeof sampleValue === "number") return "number";
+  if (typeof sampleValue === "boolean") return "bool";
+  return "text";
+}
+
+function normalizeRwMode(method) {
+  const mode = String(method || "").trim().toLowerCase();
+  if (!mode) return "rw";
+  if (mode.includes("rw") || (mode.includes("read") && mode.includes("write"))) return "rw";
+  if (mode === "r" || mode === "ro" || mode.includes("read")) return "r";
+  if (mode === "w" || mode === "wo" || mode.includes("write")) return "w";
+  return mode;
+}
+
+function normalizePropertyDefinition(raw) {
+  const identifier =
+    pickFirstNonEmpty(readField(raw, "propertyName", "property_name", "identifier", "name")) || null;
   if (!identifier) return null;
-  return { identifier, name, dataType, rwMode, required };
+
+  const dataType = normalizeDataType(readField(raw, "dataType", "data_type"), readField(raw, "defaultValue", "default_value"));
+
+  return {
+    identifier,
+    name: pickFirstNonEmpty(readField(raw, "name", "propertyName", "property_name", "identifier"), identifier),
+    dataType,
+    rwMode: normalizeRwMode(readField(raw, "method")),
+    required: Boolean(readField(raw, "required")),
+    unit: pickFirstNonEmpty(readField(raw, "unit")) || "",
+    description: pickFirstNonEmpty(readField(raw, "description")) || ""
+  };
 }
 
 function normalizePropertyList(sourceProperties) {
-  return (Array.isArray(sourceProperties) ? sourceProperties : [])
-    .map(normalizeProperty)
+  if (!Array.isArray(sourceProperties)) return [];
+  return sourceProperties
+    .map(normalizePropertyDefinition)
     .filter(Boolean)
     .sort((a, b) => a.identifier.localeCompare(b.identifier));
 }
 
-function parsePropertyStateValue(dataType, rawValue) {
-  if (rawValue === undefined || rawValue === null) return null;
-  const type = String(dataType || "").toLowerCase();
-  const text = String(rawValue);
+function setThingModel(properties, source, trigger) {
+  state.thingModel.properties = properties;
+  state.thingModel.updatedAt = nowIso();
+  state.thingModel.lastError = null;
+  state.thingModel.source = source;
 
-  if (type === "bool" || type === "boolean") {
-    if (text === "1" || text.toLowerCase() === "true") return 1;
-    if (text === "0" || text.toLowerCase() === "false") return 0;
+  if (Array.isArray(state.propertyState.properties) && state.propertyState.properties.length > 0) {
+    state.propertyState.properties = mergePropertyStateWithThingModel(state.propertyState.properties);
+    emitPropertyStateEvent("thing_model_sync");
   }
 
-  if (["int", "float", "double", "long"].includes(type)) {
-    const n = Number(text);
-    if (Number.isFinite(n)) return n;
-  }
-
-  if (type === "struct" || type === "array") {
-    try {
-      return JSON.parse(text);
-    } catch (_error) {
-      return text;
-    }
-  }
-
-  return text;
+  emitThingModelEvent(trigger);
+  emitStatus();
 }
 
-function normalizePropertyStateEntry(entry) {
-  const identifier = String(entry?.Identifier || entry?.identifier || "").trim();
-  if (!identifier) return null;
-
-  const dataType = String(entry?.DataType || entry?.dataType || "unknown").toLowerCase();
-  const valueRaw = entry?.Value === undefined || entry?.Value === null ? null : String(entry.Value);
-  const value = parsePropertyStateValue(dataType, valueRaw);
-  const timeMs = Number(entry?.Time || entry?.time || 0);
-  const timestamp = Number.isFinite(timeMs) && timeMs > 0 ? new Date(timeMs).toISOString() : null;
-
-  return {
-    identifier,
-    name: String(entry?.Name || entry?.name || identifier),
-    dataType,
-    unit: entry?.Unit || entry?.unit || "",
-    value,
-    valueRaw,
-    timestamp
-  };
-}
-
-function mergePropertyStateWithThingModel(statusEntries) {
-  const byIdentifier = new Map((Array.isArray(statusEntries) ? statusEntries : []).map((item) => [item.identifier, item]));
-  const modelProps = Array.isArray(state.thingModel.properties) ? state.thingModel.properties : [];
-  const merged = [];
-
-  for (const p of modelProps) {
-    const found = byIdentifier.get(p.identifier) || null;
-    merged.push({
-      identifier: p.identifier,
-      name: p.name,
-      dataType: p.dataType,
-      rwMode: p.rwMode || null,
-      required: Boolean(p.required),
-      unit: found?.unit || "",
-      value: found?.value ?? null,
-      valueRaw: found?.valueRaw ?? null,
-      timestamp: found?.timestamp || null
-    });
-    byIdentifier.delete(p.identifier);
-  }
-
-  for (const extra of byIdentifier.values()) {
-    merged.push({
-      identifier: extra.identifier,
-      name: extra.name,
-      dataType: extra.dataType,
-      rwMode: null,
-      required: false,
-      unit: extra.unit || "",
-      value: extra.value ?? null,
-      valueRaw: extra.valueRaw ?? null,
-      timestamp: extra.timestamp || null
-    });
-  }
-
-  return merged.sort((a, b) => a.identifier.localeCompare(b.identifier));
+function setThingModelError(message, source, trigger) {
+  state.thingModel.lastError = message;
+  state.thingModel.source = source;
+  emitThingModelEvent(trigger);
+  emitStatus();
 }
 
 function setPropertyState(properties, source, trigger) {
@@ -855,79 +393,278 @@ function setPropertyStateError(message, source, trigger) {
   emitPropertyStateEvent(trigger);
   emitStatus();
 }
-
-function upsertPropertyStateByParams(params, trigger = "mqtt_report") {
-  if (!params || typeof params !== "object" || Array.isArray(params)) return;
-  const mergedMap = new Map(
-    (Array.isArray(state.propertyState.properties) ? state.propertyState.properties : []).map((item) => [item.identifier, item])
-  );
-  const now = nowIso();
-
-  for (const [identifier, value] of Object.entries(params)) {
-    const existing = mergedMap.get(identifier);
-    const model = state.thingModel.properties.find((item) => item.identifier === identifier);
-    const dataType = model?.dataType || existing?.dataType || typeof value;
-    mergedMap.set(identifier, {
-      identifier,
-      name: model?.name || existing?.name || identifier,
-      dataType,
-      rwMode: model?.rwMode || existing?.rwMode || null,
-      required: model?.required ?? existing?.required ?? false,
-      unit: existing?.unit || "",
-      value,
-      valueRaw: typeof value === "string" ? value : JSON.stringify(value),
-      timestamp: now
-    });
-  }
-
-  const merged = [...mergedMap.values()].sort((a, b) => a.identifier.localeCompare(b.identifier));
-  setPropertyState(merged, "mqtt_report", trigger);
-}
-
-async function refreshPropertyStateByOpenApi(trigger = "manual") {
-  if (!state.config?.productKey || !state.config?.deviceName) {
-    throw new Error("Device is not configured. Connect first.");
-  }
-
-  if (!hasOpenApiCredentials()) {
-    throw new Error("OpenAPI credentials are not configured.");
-  }
-
-  const { response } = await openApiRequestWithInstanceFallback("QueryDevicePropertyStatus", () => ({
-    ProductKey: state.config.productKey,
-    DeviceName: state.config.deviceName
-  }));
-
-  const rawList = response?.Data?.List?.PropertyStatusInfo;
-  let list = [];
-  if (Array.isArray(rawList)) list = rawList;
-  else if (rawList && typeof rawList === "object") list = [rawList];
-
-  const normalized = list.map(normalizePropertyStateEntry).filter(Boolean);
-  const merged = mergePropertyStateWithThingModel(normalized);
-  setPropertyState(merged, "openapi_query_property_status", trigger);
+function normalizePropertyStateEntry(identifier, value, timestamp = nowIso()) {
+  const model = state.thingModel.properties.find((item) => item.identifier === identifier);
+  const dataType = model?.dataType || normalizeDataType("", value);
+  const valueRaw = typeof value === "string" ? value : JSON.stringify(value);
 
   return {
-    properties: merged,
-    updatedAt: state.propertyState.updatedAt,
-    lastError: null,
-    source: state.propertyState.source
+    identifier,
+    name: model?.name || identifier,
+    dataType,
+    rwMode: model?.rwMode || null,
+    required: model?.required ?? false,
+    unit: model?.unit || "",
+    value,
+    valueRaw,
+    timestamp
+  };
+}
+
+function mergePropertyStateWithThingModel(statusEntries) {
+  const map = new Map();
+
+  for (const entry of Array.isArray(statusEntries) ? statusEntries : []) {
+    if (!entry?.identifier) continue;
+    map.set(entry.identifier, entry);
+  }
+
+  for (const model of state.thingModel.properties) {
+    if (!map.has(model.identifier)) {
+      map.set(model.identifier, {
+        identifier: model.identifier,
+        name: model.name,
+        dataType: model.dataType,
+        rwMode: model.rwMode,
+        required: model.required,
+        unit: model.unit || "",
+        value: null,
+        valueRaw: "",
+        timestamp: null
+      });
+    } else {
+      const existing = map.get(model.identifier);
+      map.set(model.identifier, {
+        ...existing,
+        name: existing.name || model.name,
+        dataType: existing.dataType || model.dataType,
+        rwMode: existing.rwMode || model.rwMode,
+        required: existing.required ?? model.required ?? false,
+        unit: existing.unit || model.unit || ""
+      });
+    }
+  }
+
+  return [...map.values()].sort((a, b) => a.identifier.localeCompare(b.identifier));
+}
+
+function applyRequestCommon(request, config = state.config) {
+  if (config?.instanceId && typeof request.withInstanceId === "function") {
+    request.withInstanceId(config.instanceId);
+  }
+  if (config?.appId && typeof request.withAppId === "function") {
+    request.withAppId(config.appId);
+  }
+  return request;
+}
+
+async function queryTargetDeviceStatus() {
+  if (!state.config?.deviceId) {
+    throw new Error("DeviceId missing. Connect first.");
+  }
+
+  const client = getIoTdaClient();
+  const request = applyRequestCommon(new IotdaV5.ShowDeviceRequest().withDeviceId(state.config.deviceId));
+  const response = await client.showDevice(request);
+
+  const status = String(readField(response, "status") || "UNKNOWN").toUpperCase();
+  state.targetDevice.status = status;
+  state.targetDevice.updatedAt = nowIso();
+  emitStatus();
+
+  return {
+    status,
+    detail: {
+      deviceId: pickFirstNonEmpty(readField(response, "deviceId", "device_id"), state.config.deviceId),
+      productId: pickFirstNonEmpty(readField(response, "productId", "product_id"), state.config.productId)
+    }
+  };
+}
+
+async function waitForTargetOnline(options = {}) {
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : TARGET_ONLINE_WAIT_MS;
+  const pollMs = Number.isFinite(Number(options.pollMs)) ? Number(options.pollMs) : TARGET_ONLINE_POLL_MS;
+  const strict = options.strict === undefined ? STRICT_TARGET_ONLINE_CHECK : Boolean(options.strict);
+
+  const startedAt = Date.now();
+  let lastStatus = "UNKNOWN";
+  let attempts = 0;
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    attempts += 1;
+    try {
+      const result = await queryTargetDeviceStatus();
+      lastStatus = result.status;
+      if (lastStatus === "ONLINE") {
+        return {
+          online: true,
+          status: lastStatus,
+          attempts,
+          waitedMs: Date.now() - startedAt
+        };
+      }
+    } catch (error) {
+      emitLog("warn", "ShowDevice polling failed.", { reason: error.message });
+    }
+
+    await delay(pollMs);
+  }
+
+  if (strict) {
+    throw new Error(`Target device ${state.config?.deviceId || "unknown"} is ${lastStatus} after waiting ${timeoutMs}ms.`);
+  }
+
+  return {
+    online: false,
+    status: lastStatus,
+    attempts,
+    waitedMs: Date.now() - startedAt
+  };
+}
+
+async function refreshThingModelProperties(trigger = "manual") {
+  if (!state.config?.productId) {
+    throw new Error("ProductId missing. Connect first.");
+  }
+
+  if (!hasHuaweiCredentials(state.config)) {
+    throw new Error("Huawei AK/SK/ProjectId not configured.");
+  }
+
+  try {
+    const client = getIoTdaClient();
+    const request = applyRequestCommon(new IotdaV5.ShowProductRequest().withProductId(state.config.productId));
+    const response = await client.showProduct(request);
+
+    const serviceCapabilities = readField(response, "serviceCapabilities", "service_capabilities");
+    const services = Array.isArray(serviceCapabilities) ? serviceCapabilities : [];
+
+    const targetService =
+      services.find(
+        (item) => pickFirstNonEmpty(readField(item, "serviceId", "service_id")) === state.config.serviceId
+      ) || services[0];
+
+    if (!targetService) {
+      throw new Error(`No service definitions found for product ${state.config.productId}.`);
+    }
+
+    const resolvedServiceId =
+      pickFirstNonEmpty(readField(targetService, "serviceId", "service_id"), state.config.serviceId, DEFAULT_SERVICE_ID) ||
+      DEFAULT_SERVICE_ID;
+    state.config.serviceId = resolvedServiceId;
+
+    const properties = normalizePropertyList(readField(targetService, "properties") || []);
+    if (properties.length === 0) {
+      throw new Error(`Service ${resolvedServiceId} has no properties.`);
+    }
+
+    setThingModel(properties, "huawei_show_product", trigger);
+    emitLog("info", "Thing model updated via Huawei ShowProduct.", {
+      serviceId: resolvedServiceId,
+      count: properties.length
+    });
+
+    return {
+      properties,
+      updatedAt: state.thingModel.updatedAt,
+      lastError: null,
+      source: state.thingModel.source
+    };
+  } catch (error) {
+    const formatted = formatHuaweiError(error);
+    setThingModelError(formatted.message, "failed", trigger);
+    emitLog("warn", "Thing model refresh failed.", {
+      trigger,
+      reason: formatted.message,
+      code: formatted.code,
+      requestId: formatted.requestId
+    });
+    throw new Error(formatted.message);
+  }
+}
+
+function extractShadowEntry(shadowList, serviceId) {
+  const list = Array.isArray(shadowList) ? shadowList : [];
+  if (!list.length) return null;
+
+  const exact = list.find((entry) => pickFirstNonEmpty(readField(entry, "serviceId", "service_id")) === serviceId);
+  return exact || list[0];
+}
+
+function extractReportedProperties(shadowEntry) {
+  const reported = readField(shadowEntry, "reported") || {};
+  const rawProps = readField(reported, "properties") || {};
+  const eventTime = pickFirstNonEmpty(readField(reported, "eventTime", "event_time"), nowIso());
+  if (!isPlainObject(rawProps)) {
+    return { properties: {}, eventTime };
+  }
+  return {
+    properties: rawProps,
+    eventTime
   };
 }
 
 async function refreshDevicePropertyState(trigger = "manual") {
+  if (!state.config?.deviceId) {
+    throw new Error("DeviceId missing. Connect first.");
+  }
+
+  if (!hasHuaweiCredentials(state.config)) {
+    throw new Error("Huawei AK/SK/ProjectId not configured.");
+  }
+
   try {
-    return await refreshPropertyStateByOpenApi(trigger);
-  } catch (error) {
-    const reason = error.message || "Property state refresh failed.";
-    setPropertyStateError(reason, "failed", trigger);
-    if (trigger !== "poll") {
-      emitLog("warn", "Property state refresh failed.", { trigger, reason });
+    const client = getIoTdaClient();
+    const request = applyRequestCommon(new IotdaV5.ShowDeviceShadowRequest().withDeviceId(state.config.deviceId));
+    const response = await client.showDeviceShadow(request);
+
+    const shadow = readField(response, "shadow");
+    const selected = extractShadowEntry(shadow, state.config.serviceId);
+
+    if (!selected) {
+      const mergedEmpty = mergePropertyStateWithThingModel([]);
+      setPropertyState(mergedEmpty, "huawei_show_device_shadow", trigger);
+      return {
+        properties: mergedEmpty,
+        updatedAt: state.propertyState.updatedAt,
+        lastError: null,
+        source: state.propertyState.source
+      };
     }
-    throw error;
+
+    const selectedServiceId = pickFirstNonEmpty(readField(selected, "serviceId", "service_id"), state.config.serviceId);
+    if (selectedServiceId) {
+      state.config.serviceId = selectedServiceId;
+    }
+
+    const { properties: propsObj, eventTime } = extractReportedProperties(selected);
+    const statusEntries = Object.entries(propsObj).map(([identifier, value]) =>
+      normalizePropertyStateEntry(identifier, value, eventTime)
+    );
+
+    const merged = mergePropertyStateWithThingModel(statusEntries);
+    setPropertyState(merged, "huawei_show_device_shadow", trigger);
+
+    return {
+      properties: merged,
+      updatedAt: state.propertyState.updatedAt,
+      lastError: null,
+      source: state.propertyState.source
+    };
+  } catch (error) {
+    const formatted = formatHuaweiError(error);
+    setPropertyStateError(formatted.message, "failed", trigger);
+    if (trigger !== "poll") {
+      emitLog("warn", "Property state refresh failed.", {
+        trigger,
+        reason: formatted.message,
+        code: formatted.code,
+        requestId: formatted.requestId
+      });
+    }
+    throw new Error(formatted.message);
   }
 }
-
 function stopPropertyPolling() {
   if (propertyPollTimer) {
     clearInterval(propertyPollTimer);
@@ -937,518 +674,52 @@ function stopPropertyPolling() {
 }
 
 function startPropertyPolling() {
-  if (!PROPERTY_POLL_ON_CONNECT || propertyPollTimer || !hasOpenApiCredentials()) {
+  if (!PROPERTY_POLL_ON_CONNECT || propertyPollTimer || !hasHuaweiCredentials(state.config) || !state.connected) {
     return;
   }
 
   propertyPollTimer = setInterval(async () => {
-    if (propertyPollRunning || !state.config?.productKey) return;
+    if (propertyPollRunning || !state.connected) return;
     propertyPollRunning = true;
     try {
       await refreshDevicePropertyState("poll");
     } catch (_error) {
-      // Polling errors are reflected in state.propertyState.lastError.
+      // keep poll running; errors are reflected in state
     } finally {
       propertyPollRunning = false;
     }
   }, PROPERTY_POLL_INTERVAL_MS);
 }
 
-function setThingModel(properties, source, trigger) {
-  state.thingModel.properties = properties;
-  state.thingModel.updatedAt = nowIso();
-  state.thingModel.lastError = null;
-  state.thingModel.source = source;
-  if (Array.isArray(state.propertyState.properties) && state.propertyState.properties.length > 0) {
-    state.propertyState.properties = mergePropertyStateWithThingModel(state.propertyState.properties);
-    emitPropertyStateEvent("thing_model_sync");
-  }
-  emitThingModelEvent(trigger);
+async function disconnectClient(reason = "manual") {
+  stopPropertyPolling();
+
+  state.connected = false;
+  state.connecting = false;
+  state.subscriptions.clear();
+
   emitStatus();
+  emitLog("info", `Cloud command session closed (${reason}).`);
 }
 
-function setThingModelError(message, source, trigger) {
-  state.thingModel.lastError = message;
-  state.thingModel.source = source;
-  emitThingModelEvent(trigger);
-  emitStatus();
-}
-
-function parseMaybeJson(value) {
-  if (typeof value === "string") {
-    const text = value.trim();
-    if (!text) return null;
-    try {
-      return JSON.parse(text);
-    } catch (_error) {
-      return null;
-    }
-  }
-  if (value && typeof value === "object") return value;
-  return null;
-}
-
-function extractThingModelProperties(payload) {
-  const queue = [payload];
-  const visited = new Set();
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const parsed = parseMaybeJson(current);
-    if (!parsed || typeof parsed !== "object") continue;
-    if (visited.has(parsed)) continue;
-    visited.add(parsed);
-
-    if (Array.isArray(parsed.properties)) {
-      const normalized = normalizePropertyList(parsed.properties);
-      if (normalized.length > 0) return normalized;
-    }
-
-    if (parsed.data !== undefined) queue.push(parsed.data);
-    if (parsed.params !== undefined) queue.push(parsed.params);
-    if (parsed.profile !== undefined) queue.push(parsed.profile);
-    if (parsed.schema !== undefined) queue.push(parsed.schema);
-    if (parsed.tsl !== undefined) queue.push(parsed.tsl);
-    if (parsed.thingModelJson !== undefined) queue.push(parsed.thingModelJson);
-    if (parsed.ThingModelJson !== undefined) queue.push(parsed.ThingModelJson);
-  }
-
-  return [];
-}
-
-function buildMqttConfig(config) {
-  const timestamp = String(Date.now());
-  const baseClientId = config.clientId || `${config.deviceName}_web_${Math.floor(Math.random() * 100000)}`;
-  const mqttClientId = `${baseClientId}|securemode=3,signmethod=hmacsha256,timestamp=${timestamp}|`;
-  const signContent = `clientId${baseClientId}deviceName${config.deviceName}productKey${config.productKey}timestamp${timestamp}`;
-  const password = crypto.createHmac("sha256", config.deviceSecret).update(signContent).digest("hex");
-  const username = `${config.deviceName}&${config.productKey}`;
-  const host = `${config.productKey}.iot-as-mqtt.${config.regionId}.aliyuncs.com`;
-  const url = `mqtt://${host}:1883`;
-
-  return {
-    url,
-    options: {
-      clientId: mqttClientId,
-      username,
-      password,
-      keepalive: 60,
-      clean: true,
-      reconnectPeriod: 3000,
-      connectTimeout: 30_000
-    },
-    debug: {
-      host,
-      port: 1883,
-      protocol: "mqtt",
-      baseClientId
-    }
-  };
-}
-
-function defaultTopics(config) {
-  const pk = config.productKey;
-  const dn = config.deviceName;
-  return [
-    `/sys/${pk}/${dn}/thing/service/property/set`,
-    `/sys/${pk}/${dn}/thing/service/property/set_reply`,
-    `/sys/${pk}/${dn}/thing/service/property/get`,
-    `/sys/${pk}/${dn}/thing/service/property/get_reply`,
-    `/sys/${pk}/${dn}/thing/event/property/post`,
-    `/sys/${pk}/${dn}/thing/event/property/post_reply`,
-    `/sys/${pk}/${dn}/thing/event/+/post_reply`,
-    `/sys/${pk}/${dn}/thing/downlink/reply/message`,
-    `/sys/${pk}/${dn}/thing/dsltemplate/get_reply`
-  ];
-}
-
-function disconnectClient(reason = "manual") {
-  return new Promise((resolve) => {
-    stopPropertyPolling();
-
-    const client = state.client;
-    if (!client) {
-      state.connected = false;
-      state.connecting = false;
-      state.subscriptions.clear();
-      emitStatus();
-      resolve();
-      return;
-    }
-
-    state.client = null;
-    state.connected = false;
-    state.connecting = false;
-    state.subscriptions.clear();
-    emitStatus();
-    emitLog("info", `MQTT disconnected (${reason}).`);
-
-    client.removeAllListeners();
-    client.end(true, {}, () => resolve());
-  });
-}
-
-function subscribeTopic(topic, qos = 0) {
-  return new Promise((resolve, reject) => {
-    if (!state.client || !state.connected) {
-      reject(new Error("MQTT client is not connected."));
-      return;
-    }
-
-    state.client.subscribe(topic, { qos }, (err, granted) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      state.subscriptions.add(topic);
-      io.emit("subscribed", { topic, granted, timestamp: nowIso() });
-      emitStatus();
-      resolve(granted);
-    });
-  });
-}
-
-async function autoSubscribeDefaultTopics() {
-  if (!state.config) return;
-  const topics = [...new Set(defaultTopics(state.config))];
-  for (const topic of topics) {
-    try {
-      await subscribeTopic(topic, 0);
-      emitLog("info", `Subscribed: ${topic}`);
-    } catch (error) {
-      emitLog("warn", `Subscribe failed: ${topic}`, { reason: error.message });
-    }
-  }
-}
-
-async function refreshThingModelByOpenApi(trigger) {
-  if (!OPENAPI_CONFIG.accessKeyId || !OPENAPI_CONFIG.accessKeySecret) {
-    throw new Error("OpenAPI credentials are not configured.");
-  }
-  if (!state.config?.productKey) {
-    throw new Error("Device is not configured. Connect first.");
-  }
-
-  const client = makeOpenApiClient(state.config.regionId || DEFAULT_REGION);
-  const attempts = [];
-  if (OPENAPI_CONFIG.iotInstanceId) {
-    attempts.push({ iotInstanceId: OPENAPI_CONFIG.iotInstanceId, label: "with_instance" });
-  }
-  attempts.push({ iotInstanceId: null, label: "without_instance" });
-
-  let lastFormattedError = null;
-
-  for (const attempt of attempts) {
-    const params = { ProductKey: state.config.productKey };
-    if (attempt.iotInstanceId) params.IotInstanceId = attempt.iotInstanceId;
-
-    try {
-      const response = await client.request("QueryThingModel", params, { method: "POST" });
-      const thingModelJson = response?.Data?.ThingModelJson;
-      if (!thingModelJson || typeof thingModelJson !== "string") {
-        throw new Error("ThingModelJson missing in QueryThingModel response.");
-      }
-
-      const parsed = JSON.parse(thingModelJson);
-      const normalized = normalizePropertyList(parsed?.properties);
-      if (normalized.length === 0) {
-        throw new Error("ThingModel has no properties.");
-      }
-
-      setThingModel(normalized, "openapi", trigger);
-      emitLog("info", "Thing model properties updated via OpenAPI.", {
-        count: normalized.length,
-        attempt: attempt.label
-      });
-      return {
-        properties: normalized,
-        updatedAt: state.thingModel.updatedAt,
-        lastError: null,
-        source: "openapi"
-      };
-    } catch (error) {
-      lastFormattedError = formatOpenApiError(error);
-      emitLog("info", "OpenAPI thing model fetch failed.", {
-        attempt: attempt.label,
-        reason: lastFormattedError.message,
-        code: lastFormattedError.code,
-        requestId: lastFormattedError.requestId
-      });
-    }
-  }
-
-  throw new Error(lastFormattedError?.message || "OpenAPI thing model fetch failed.");
-}
-
-async function refreshThingModelByMqttDsl(trigger) {
-  if (!state.client || !state.connected || !state.config) {
-    throw new Error("MQTT not connected, cannot query dsltemplate.");
-  }
-
-  const pk = state.config.productKey;
-  const dn = state.config.deviceName;
-  const requestTopic = `/sys/${pk}/${dn}/thing/dsltemplate/get`;
-  const replyTopic = `/sys/${pk}/${dn}/thing/dsltemplate/get_reply`;
-  const requestId = `dsl_${Date.now()}`;
-
-  await subscribeTopic(replyTopic, 0).catch(() => {});
-
-  const requestPayload = {
-    id: requestId,
-    version: "1.0",
-    params: {},
-    method: "thing.dsltemplate.get"
-  };
-
-  const timeoutMs = 12_000;
-
-  return new Promise((resolve, reject) => {
-    let finished = false;
-    const done = (error, result) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      state.client.removeListener("message", onMessage);
-      if (error) reject(error);
-      else resolve(result);
-    };
-
-    const timer = setTimeout(() => {
-      done(new Error("MQTT dsltemplate query timeout."));
-    }, timeoutMs);
-
-    const onMessage = (topic, payloadBuffer) => {
-      if (topic !== replyTopic) return;
-
-      let messageObj = null;
-      try {
-        messageObj = JSON.parse(payloadBuffer.toString("utf8"));
-      } catch (_error) {
-        return;
-      }
-
-      const messageId = String(messageObj?.id || "");
-      if (messageId && messageId !== requestId) return;
-
-      const code = String(messageObj?.code ?? "");
-      if (code && code !== "200" && code !== "0") {
-        const reason = messageObj?.message || messageObj?.desc || `MQTT dsltemplate error: ${code}`;
-        done(new Error(reason));
-        return;
-      }
-
-      const normalized = extractThingModelProperties(messageObj);
-      if (!normalized.length) {
-        done(new Error("No properties found in MQTT dsltemplate reply."));
-        return;
-      }
-
-      setThingModel(normalized, "mqtt_dsltemplate", trigger);
-      emitLog("info", "Thing model properties updated via MQTT dsltemplate.", {
-        count: normalized.length
-      });
-      done(null, {
-        properties: normalized,
-        updatedAt: state.thingModel.updatedAt,
-        lastError: null,
-        source: "mqtt_dsltemplate"
-      });
-    };
-
-    state.client.on("message", onMessage);
-    state.client.publish(requestTopic, JSON.stringify(requestPayload), { qos: 0 }, (error) => {
-      if (error) {
-        done(new Error(`Publish dsltemplate/get failed: ${error.message}`));
-      }
-    });
-  });
-}
-
-async function refreshThingModelProperties(trigger = "manual") {
-  if (!state.config?.productKey) {
-    throw new Error("Device is not configured. Connect first.");
-  }
-
-  let openApiError = null;
-  try {
-    return await refreshThingModelByOpenApi(trigger);
-  } catch (error) {
-    openApiError = error;
-  }
-
-  if (state.connected) {
-    try {
-      emitLog("info", "OpenAPI failed, trying MQTT dsltemplate fallback...", {
-        reason: openApiError?.message || "unknown"
-      });
-      return await refreshThingModelByMqttDsl(trigger);
-    } catch (mqttError) {
-      const combined = `OpenAPI: ${openApiError?.message || "unknown"} | MQTT: ${mqttError.message}`;
-      setThingModelError(combined, "failed", trigger);
-      emitLog("warn", "Thing model refresh failed.", {
-        trigger,
-        reason: combined
-      });
-      throw new Error(combined);
-    }
-  }
-
-  const reason = openApiError?.message || "Thing model refresh failed.";
-  setThingModelError(reason, "failed", trigger);
-  emitLog("warn", "Thing model refresh failed.", { trigger, reason });
-  throw new Error(reason);
-}
-
-async function sendCloudCommandByTopic({ topic, payload, qos = 0 }) {
-  const route = parseTopicRoute(topic);
-
-  let localSessionReleased = false;
-  let targetStatus = null;
-  let targetOnlineWait = null;
-
-  async function prepareTargetDevice() {
-    if (!route.productKey || !route.deviceName) return;
-    localSessionReleased = await releaseLocalSessionIfSameDevice(route.productKey, route.deviceName);
-
-    try {
-      const waitResult = await waitForTargetOnline(route.productKey, route.deviceName, {
-        timeoutMs: TARGET_ONLINE_WAIT_MS,
-        pollMs: TARGET_ONLINE_POLL_MS,
-        strict: false,
-        releasedLocalSession: localSessionReleased
-      });
-      targetStatus = waitResult.status;
-      targetOnlineWait = waitResult;
-
-      if (!waitResult.online) {
-        const level = STRICT_TARGET_ONLINE_CHECK ? "error" : "warn";
-        emitLog(level, "Target device is still offline before dispatch.", {
-          productKey: route.productKey,
-          deviceName: route.deviceName,
-          status: targetStatus,
-          waitedMs: waitResult.waitedMs,
-          attempts: waitResult.attempts
-        });
-
-        if (STRICT_TARGET_ONLINE_CHECK) {
-          throw new Error(`Target device ${route.productKey}/${route.deviceName} is ${targetStatus}.`);
-        }
-      }
-    } catch (error) {
-      if (STRICT_TARGET_ONLINE_CHECK && String(error.message || "").includes("Target device")) {
-        throw error;
-      }
-      emitLog("warn", "GetDeviceStatus failed before command dispatch. Continue dispatch with best effort.", {
-        topic,
-        reason: error.message
-      });
-    }
-  }
-
-  if (route.type === "property_set") {
-    await prepareTargetDevice();
-    const normalized = normalizePropertySetPayload(payload);
-    const normalizedQos = Number.isFinite(Number(qos)) && (Number(qos) === 0 || Number(qos) === 1) ? Number(qos) : 1;
-
-    const dispatch = await requestWithOfflineRetry(
-      "SetDeviceProperty",
-      () =>
-        openApiRequestWithInstanceFallback("SetDeviceProperty", () => ({
-          ProductKey: route.productKey,
-          DeviceName: route.deviceName,
-          Items: JSON.stringify(normalized.items),
-          Qos: normalizedQos
-        })),
-      {
-        productKey: route.productKey,
-        deviceName: route.deviceName
-      }
-    );
-    const { response } = dispatch.result;
-
-    return {
-      route: "set_device_property",
-      requestData: normalized.items,
-      normalizedPayload: normalized.envelope,
-      warnings: normalized.callbackWarnings || [],
-      localSessionReleased,
-      targetStatus,
-      targetOnlineWait,
-      qos: normalizedQos,
-      retryAttempts: dispatch.attempts,
-      responseData: response?.Data || null
-    };
-  }
-
-  if (route.type === "service_invoke") {
-    await prepareTargetDevice();
-    const normalized = normalizeServiceInvokePayload(payload, route.identifier);
-    const dispatch = await requestWithOfflineRetry(
-      "InvokeThingService",
-      () =>
-        openApiRequestWithInstanceFallback("InvokeThingService", () => ({
-          ProductKey: route.productKey,
-          DeviceName: route.deviceName,
-          Identifier: route.identifier,
-          Args: JSON.stringify(normalized.args)
-        })),
-      {
-        productKey: route.productKey,
-        deviceName: route.deviceName,
-        identifier: route.identifier
-      }
-    );
-    const { response } = dispatch.result;
-
-    return {
-      route: "invoke_thing_service",
-      requestData: { identifier: route.identifier, args: normalized.args },
-      normalizedPayload: normalized.envelope,
-      localSessionReleased,
-      targetStatus,
-      targetOnlineWait,
-      retryAttempts: dispatch.attempts,
-      responseData: response?.Data || null
-    };
-  }
-
-  if (route.type === "custom_pub") {
-    await prepareTargetDevice();
-    let textPayload = payload;
-    if (textPayload === undefined || textPayload === null) textPayload = "";
-    if (typeof textPayload !== "string") textPayload = JSON.stringify(textPayload);
-
-    const { response } = await openApiRequestWithInstanceFallback("Pub", () => ({
-      ProductKey: route.productKey,
-      TopicFullName: topic,
-      MessageContent: Buffer.from(textPayload, "utf8").toString("base64"),
-      Qos: Number.isFinite(Number(qos)) ? Number(qos) : 0
-    }));
-
-    return {
-      route: "pub_custom_topic",
-      requestData: { topic, qos: Number.isFinite(Number(qos)) ? Number(qos) : 0 },
-      localSessionReleased,
-      targetStatus,
-      targetOnlineWait,
-      responseData: response?.Data || null
-    };
-  }
-
-  return null;
+function validateRuntimeConfig(config) {
+  const missing = [];
+  if (!config.regionId && !config.endpoint) missing.push("HWCLOUD_REGION_ID or HWCLOUD_ENDPOINT");
+  if (!config.projectId) missing.push("HWCLOUD_PROJECT_ID");
+  if (!config.ak) missing.push("HWCLOUD_AK");
+  if (!config.sk) missing.push("HWCLOUD_SK");
+  if (!config.deviceId) missing.push("HWCLOUD_DEVICE_ID");
+  if (!config.productId) missing.push("HWCLOUD_PRODUCT_ID");
+  if (!config.serviceId) missing.push("HWCLOUD_SERVICE_ID");
+  return missing;
 }
 
 async function connectClient(configInput) {
-  const config = {
-    productKey: pickFirstNonEmpty(configInput.productKey, process.env.ALIYUN_PRODUCT_KEY),
-    deviceName: pickFirstNonEmpty(configInput.deviceName, process.env.ALIYUN_DEVICE_NAME),
-    deviceSecret: pickFirstNonEmpty(configInput.deviceSecret, process.env.ALIYUN_DEVICE_SECRET),
-    regionId: pickFirstNonEmpty(configInput.regionId, process.env.ALIYUN_REGION_ID, DEFAULT_REGION),
-    clientId: pickFirstNonEmpty(configInput.clientId, process.env.ALIYUN_CLIENT_ID) || null
-  };
+  const config = buildRuntimeConfig(configInput || {});
+  const missing = validateRuntimeConfig(config);
 
-  if (!config.productKey || !config.deviceName || !config.deviceSecret || !config.regionId) {
-    throw new Error("Missing device triplet or region. Configure .env first.");
+  if (missing.length > 0) {
+    throw new Error(`Missing required Huawei config: ${missing.join(", ")}`);
   }
 
   await disconnectClient("reconnect");
@@ -1458,186 +729,293 @@ async function connectClient(configInput) {
   state.connecting = true;
   emitStatus();
 
-  if (!ENABLE_LOCAL_MQTT) {
-    state.client = null;
-    state.subscriptions.clear();
-    state.connected = true;
-    state.connecting = false;
-    emitStatus();
-    emitLog("info", "Cloud command mode connected. Local MQTT is disabled to avoid device session conflicts.");
+  state.connected = true;
+  state.connecting = false;
+  emitStatus();
 
-    try {
-      const statusInfo = await waitForTargetOnline(config.productKey, config.deviceName, {
-        timeoutMs: Math.min(TARGET_ONLINE_WAIT_MS, 8000),
-        pollMs: TARGET_ONLINE_POLL_MS,
-        strict: false
-      });
-      emitLog("info", "Target device status checked in cloud command mode.", {
-        status: statusInfo.status,
-        waitedMs: statusInfo.waitedMs,
-        attempts: statusInfo.attempts
-      });
-    } catch (error) {
-      emitLog("warn", "Target status check failed in cloud command mode.", { reason: error.message });
-    }
+  emitLog("info", "Huawei IoTDA command mode ready.", {
+    regionId: config.regionId,
+    endpoint: config.endpoint || null,
+    deviceId: config.deviceId,
+    productId: config.productId,
+    serviceId: config.serviceId
+  });
 
-    try {
-      await refreshThingModelProperties("cloud_connect");
-    } catch (_error) {
-      // Keep command mode online when model refresh fails.
-    }
-
-    try {
-      await refreshDevicePropertyState("cloud_connect");
-    } catch (_error) {
-      // Keep command mode online when property-state refresh fails.
-    }
-
-    startPropertyPolling();
-
-    return;
+  try {
+    const online = await waitForTargetOnline({
+      timeoutMs: Math.min(TARGET_ONLINE_WAIT_MS, 8000),
+      pollMs: TARGET_ONLINE_POLL_MS,
+      strict: false
+    });
+    emitLog("info", "Target device status checked.", online);
+  } catch (error) {
+    emitLog("warn", "Target status check failed.", { reason: error.message });
   }
 
-  const { url, options, debug } = buildMqttConfig(config);
-  emitLog("info", "Connecting to Alibaba Cloud IoT MQTT over TCP (non-TLS)...", {
-    host: debug.host,
-    port: debug.port,
-    protocol: debug.protocol,
-    clientId: debug.baseClientId,
-    securemode: 3,
-    signmethod: "hmacsha256"
-  });
+  try {
+    await refreshThingModelProperties("cloud_connect");
+  } catch (_error) {
+    // keep connected
+  }
 
-  const client = mqtt.connect(url, options);
-  state.client = client;
+  try {
+    await refreshDevicePropertyState("cloud_connect");
+  } catch (_error) {
+    // keep connected
+  }
 
-  let lastErrorSignature = "";
-  let lastErrorTimestamp = 0;
+  startPropertyPolling();
+}
 
-  client.on("connect", async () => {
-    if (state.client !== client) return;
-    state.connected = true;
-    state.connecting = false;
-    state.lastError = null;
-    emitStatus();
-    emitLog("info", "MQTT connected.");
+function parsePayloadObject(payload) {
+  if (payload === null || payload === undefined || payload === "") {
+    return {};
+  }
 
-    await autoSubscribeDefaultTopics();
-
+  if (typeof payload === "string") {
+    const text = payload.trim();
+    if (!text) return {};
     try {
-      await refreshThingModelProperties("mqtt_connect");
+      return JSON.parse(text);
     } catch (_error) {
-      // Keep MQTT connection alive when model refresh fails.
+      throw new Error("payload must be valid JSON.");
+    }
+  }
+
+  if (!isPlainObject(payload)) {
+    throw new Error("payload must be an object JSON.");
+  }
+
+  return payload;
+}
+
+function detectCommandNameByParams(params) {
+  if (!isPlainObject(params)) return "";
+  const hasLight = Object.prototype.hasOwnProperty.call(params, "Light_Status");
+  const hasRelay = Object.prototype.hasOwnProperty.call(params, "Relay_Status");
+
+  if (hasLight && hasRelay) {
+    throw new Error("params cannot contain both Light_Status and Relay_Status in one command.");
+  }
+  if (hasLight) return "turn_light";
+  if (hasRelay) return "turn_relay";
+  return "";
+}
+
+function normalizeCommandPayload(payload) {
+  const body = parsePayloadObject(payload);
+  const warnings = [];
+
+  const serviceId = pickFirstNonEmpty(
+    readField(body, "service_id", "serviceId"),
+    state.config?.serviceId,
+    DEFAULT_SERVICE_ID
+  );
+
+  let commandName = pickFirstNonEmpty(readField(body, "command_name", "commandName"));
+  let paras = isPlainObject(readField(body, "paras")) ? { ...readField(body, "paras") } : {};
+
+  const method = String(readField(body, "method") || "").trim();
+  const params = isPlainObject(readField(body, "params")) ? { ...readField(body, "params") } : {};
+
+  if (!commandName) {
+    if (method === "thing.service.property.set" || Object.keys(params).length > 0) {
+      commandName = detectCommandNameByParams(params);
+      if (commandName) {
+        warnings.push("Legacy property payload detected and auto-converted to Huawei command payload.");
+        paras = { ...params };
+      }
+    }
+  }
+
+  if (!commandName) {
+    throw new Error("Missing command_name. Supported commands: turn_light, turn_relay, blink_light, blink_relay.");
+  }
+
+  commandName = String(commandName).trim();
+
+  if (commandName === "turn_light") {
+    const rawValue = paras.Light_Status;
+    if (rawValue === undefined) {
+      throw new Error("turn_light requires paras.Light_Status.");
     }
 
+    return {
+      normalizedPayload: {
+        service_id: serviceId,
+        command_name: "turn_light",
+        paras: {
+          Light_Status: coerceBinaryValue(rawValue)
+        }
+      },
+      warnings
+    };
+  }
+
+  if (commandName === "turn_relay") {
+    const rawValue = paras.Relay_Status;
+    if (rawValue === undefined) {
+      throw new Error("turn_relay requires paras.Relay_Status.");
+    }
+
+    return {
+      normalizedPayload: {
+        service_id: serviceId,
+        command_name: "turn_relay",
+        paras: {
+          Relay_Status: coerceBinaryValue(rawValue)
+        }
+      },
+      warnings
+    };
+  }
+
+  if (commandName === "blink_light") {
+    const blinkCount = coerceIntegerValue(paras.blink_count, "blink_light paras.blink_count");
+    const onMs = coerceIntegerValue(paras.on_ms, "blink_light paras.on_ms");
+    const offMs = coerceIntegerValue(paras.off_ms, "blink_light paras.off_ms");
+
+    if (blinkCount <= 0) throw new Error("blink_light paras.blink_count must be > 0.");
+    if (onMs <= 0) throw new Error("blink_light paras.on_ms must be > 0.");
+    if (offMs <= 0) throw new Error("blink_light paras.off_ms must be > 0.");
+
+    return {
+      normalizedPayload: {
+        service_id: serviceId,
+        command_name: "blink_light",
+        paras: {
+          blink_count: blinkCount,
+          on_ms: onMs,
+          off_ms: offMs
+        }
+      },
+      warnings
+    };
+  }
+
+  if (commandName === "blink_relay") {
+    const blinkCount = coerceIntegerValue(paras.blink_count, "blink_relay paras.blink_count");
+    const onMs = coerceIntegerValue(paras.on_ms, "blink_relay paras.on_ms");
+    const offMs = coerceIntegerValue(paras.off_ms, "blink_relay paras.off_ms");
+
+    if (blinkCount <= 0) throw new Error("blink_relay paras.blink_count must be > 0.");
+    if (onMs <= 0) throw new Error("blink_relay paras.on_ms must be > 0.");
+    if (offMs <= 0) throw new Error("blink_relay paras.off_ms must be > 0.");
+
+    return {
+      normalizedPayload: {
+        service_id: serviceId,
+        command_name: "blink_relay",
+        paras: {
+          blink_count: blinkCount,
+          on_ms: onMs,
+          off_ms: offMs
+        }
+      },
+      warnings
+    };
+  }
+
+  throw new Error(
+    `Unsupported command_name: ${commandName}. Allowed: turn_light, turn_relay, blink_light, blink_relay.`
+  );
+}
+
+async function retryCloudDispatch(actionName, runner) {
+  let lastError = null;
+  for (let i = 1; i <= CLOUD_DISPATCH_RETRY_ATTEMPTS; i += 1) {
     try {
-      await refreshDevicePropertyState("mqtt_connect");
-    } catch (_error) {
-      // Keep MQTT connection alive when property-state refresh fails.
+      const result = await runner();
+      return { result, attempts: i };
+    } catch (error) {
+      lastError = error;
+      if (i >= CLOUD_DISPATCH_RETRY_ATTEMPTS) break;
+      await delay(CLOUD_DISPATCH_RETRY_INTERVAL_MS);
+      emitLog("warn", `${actionName} failed, retrying...`, {
+        attempt: i,
+        nextAttemptInMs: CLOUD_DISPATCH_RETRY_INTERVAL_MS,
+        reason: error.message
+      });
     }
+  }
+  throw lastError || new Error(`${actionName} failed.`);
+}
 
-    startPropertyPolling();
+async function dispatchHuaweiCommand({ topic, payload }) {
+  const { normalizedPayload, warnings } = normalizeCommandPayload(payload);
+
+  const targetOnlineWait = await waitForTargetOnline({
+    timeoutMs: TARGET_ONLINE_WAIT_MS,
+    pollMs: TARGET_ONLINE_POLL_MS,
+    strict: STRICT_TARGET_ONLINE_CHECK
   });
 
-  client.on("reconnect", () => {
-    if (state.client !== client) return;
-    state.connected = false;
-    state.connecting = true;
-    emitStatus();
-    emitLog("warn", "MQTT reconnecting...");
-  });
+  const client = getIoTdaClient();
 
-  client.on("offline", () => {
-    if (state.client !== client) return;
-    state.connected = false;
-    emitStatus();
-    emitLog("warn", "MQTT offline.");
-  });
+  const body = new IotdaV5.DeviceCommandRequest()
+    .withServiceId(normalizedPayload.service_id)
+    .withCommandName(normalizedPayload.command_name)
+    .withParas(normalizedPayload.paras);
 
-  client.on("close", () => {
-    if (state.client !== client) return;
-    state.connected = false;
-    emitStatus();
-    emitLog("warn", "MQTT connection closed.");
-  });
+  const request = applyRequestCommon(
+    new IotdaV5.CreateCommandRequest().withDeviceId(state.config.deviceId).withBody(body)
+  );
 
-  client.on("error", (error) => {
-    if (state.client !== client) return;
-    state.lastError = error.message;
-    const classification = classifyMqttError(error);
+  const dispatch = await retryCloudDispatch("CreateCommand", () => client.createCommand(request));
+  const response = dispatch.result;
 
-    const signature = `${classification.kind}|${error.code || ""}|${error.message || ""}`;
-    const now = Date.now();
-    const duplicated = signature === lastErrorSignature && now - lastErrorTimestamp < 1200;
-    lastErrorSignature = signature;
-    lastErrorTimestamp = now;
-    if (duplicated) return;
+  const responseErrorCode = pickFirstNonEmpty(readField(response, "errorCode", "error_code"));
+  if (responseErrorCode && responseErrorCode !== "0") {
+    throw new Error(`CreateCommand failed with error_code=${responseErrorCode}`);
+  }
 
-    emitStatus();
-    emitLog("error", "MQTT error.", {
-      reason: error.message,
-      code: error.code || null,
-      category: classification.kind,
-      hint: classification.hint
-    });
-  });
+  const commandTopic = topic || `$oc/devices/${state.config.deviceId}/sys/commands`;
 
-  client.on("message", (topic, payloadBuffer, packet) => {
-    if (state.client !== client) return;
-    const textPayload = payloadBuffer.toString("utf8");
-    let jsonPayload = null;
-    try {
-      jsonPayload = JSON.parse(textPayload);
-    } catch (_ignored) {
-      jsonPayload = null;
-    }
-
-    io.emit("mqtt_message", {
-      topic,
-      payload: textPayload,
-      jsonPayload,
-      qos: packet?.qos ?? 0,
-      retain: Boolean(packet?.retain),
-      timestamp: nowIso()
-    });
-
-    if (jsonPayload?.method === "thing.event.property.post" && jsonPayload?.params) {
-      upsertPropertyStateByParams(jsonPayload.params, "mqtt_report");
-    }
-  });
+  return {
+    topic: commandTopic,
+    route: "huawei_create_command",
+    warnings,
+    normalizedPayload,
+    responseData: {
+      commandId: readField(response, "commandId", "command_id") || null,
+      response: readField(response, "response") || null,
+      errorCode: responseErrorCode || null,
+      errorMsg: readField(response, "errorMsg", "error_msg") || null
+    },
+    targetStatus: targetOnlineWait.status,
+    targetOnlineWait,
+    retryAttempts: dispatch.attempts
+  };
 }
 
 function ensureConnected(res) {
-  if (!state.client || !state.connected) {
+  if (!state.connected || !state.config) {
     res.status(400).json({
       ok: false,
-      message: "MQTT is not connected. Connect first."
+      message: "Huawei command channel is not connected. Call /api/connect first."
     });
     return false;
   }
   return true;
 }
-
 app.get("/api/status", (req, res) => {
   res.json({
     ok: true,
     ...statusPayload(),
     defaults: {
       regionId: DEFAULT_REGION,
-      hasEnvTriplet: HAS_ENV_TRIPLET,
+      hasEnvTriplet: hasHuaweiDeviceConfig(ENV_DEFAULTS),
       autoConnectOnStart: AUTO_CONNECT_ON_START,
-      hasOpenApiCredentials:
-        Boolean(OPENAPI_CONFIG.accessKeyId) && Boolean(OPENAPI_CONFIG.accessKeySecret),
-      transport: ENABLE_LOCAL_MQTT ? "mqtt_tcp_non_tls_1883" : "openapi_command_only",
-      enableLocalMqtt: ENABLE_LOCAL_MQTT,
-      allowCloudRouteMqttFallback: ALLOW_CLOUD_ROUTE_MQTT_FALLBACK,
+      hasOpenApiCredentials: hasHuaweiCredentials(ENV_DEFAULTS),
+      transport: "openapi_command_only",
       strictTargetOnlineCheck: STRICT_TARGET_ONLINE_CHECK,
       targetOnlineWaitMs: TARGET_ONLINE_WAIT_MS,
       targetOnlinePollMs: TARGET_ONLINE_POLL_MS,
       cloudDispatchRetryAttempts: CLOUD_DISPATCH_RETRY_ATTEMPTS,
       cloudDispatchRetryIntervalMs: CLOUD_DISPATCH_RETRY_INTERVAL_MS,
       propertyPollOnConnect: PROPERTY_POLL_ON_CONNECT,
-      propertyPollIntervalMs: PROPERTY_POLL_INTERVAL_MS
+      propertyPollIntervalMs: PROPERTY_POLL_INTERVAL_MS,
+      provider: "huawei_iotda"
     }
   });
 });
@@ -1662,32 +1040,12 @@ app.get("/api/device/properties", (req, res) => {
   });
 });
 
-app.post("/api/device/properties/refresh", async (req, res) => {
-  try {
-    const result = await refreshDevicePropertyState("manual_refresh");
-    res.json({
-      ok: true,
-      ...result
-    });
-  } catch (error) {
-    res.status(400).json({
-      ok: false,
-      message: error.message,
-      properties: state.propertyState.properties,
-      updatedAt: state.propertyState.updatedAt,
-      lastError: state.propertyState.lastError,
-      source: state.propertyState.source
-    });
-  }
-});
-
 app.post("/api/model/refresh", async (req, res) => {
+  if (!ensureConnected(res)) return;
+
   try {
     const result = await refreshThingModelProperties("manual_refresh");
-    res.json({
-      ok: true,
-      ...result
-    });
+    res.json({ ok: true, ...result });
   } catch (error) {
     res.status(400).json({
       ok: false,
@@ -1700,256 +1058,141 @@ app.post("/api/model/refresh", async (req, res) => {
   }
 });
 
+app.post("/api/device/properties/refresh", async (req, res) => {
+  if (!ensureConnected(res)) return;
+
+  try {
+    const result = await refreshDevicePropertyState("manual_refresh");
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      message: error.message,
+      properties: state.propertyState.properties,
+      updatedAt: state.propertyState.updatedAt,
+      lastError: state.propertyState.lastError,
+      source: state.propertyState.source
+    });
+  }
+});
+
 app.post("/api/connect", async (req, res) => {
   try {
     await connectClient(req.body || {});
     res.json({
       ok: true,
-      message: ENABLE_LOCAL_MQTT
-        ? "MQTT connect request accepted. Check status in a few seconds."
-        : "Cloud command mode is ready. Local MQTT is disabled."
+      message: "Huawei IoTDA command mode ready."
     });
   } catch (error) {
     state.lastError = error.message;
     emitStatus();
     emitLog("error", "Connect request failed.", { reason: error.message });
-    res.status(400).json({
-      ok: false,
-      message: error.message
-    });
+    res.status(400).json({ ok: false, message: error.message });
   }
 });
 
 app.post("/api/disconnect", async (req, res) => {
   await disconnectClient("api");
-  res.json({
-    ok: true,
-    message: "Disconnected."
-  });
+  res.json({ ok: true, message: "Disconnected." });
 });
 
 app.post("/api/subscribe", async (req, res) => {
-  if (!ENABLE_LOCAL_MQTT) {
-    res.status(400).json({
-      ok: false,
-      message: "Local MQTT subscribe is disabled in openapi_command_only mode."
-    });
-    return;
-  }
-  if (!ensureConnected(res)) return;
-
-  const rawTopic = String(req.body?.topic || "").trim();
-  const topic = normalizeTopicInput(rawTopic);
-  const qos = Number(req.body?.qos ?? 0);
-  if (!topic) {
-    res.status(400).json({ ok: false, message: "topic is required." });
-    return;
-  }
-
-  try {
-    const granted = await subscribeTopic(topic, Number.isFinite(qos) ? qos : 0);
-    emitLog("info", `Subscribed: ${topic}`);
-    res.json({ ok: true, topic, rawTopic, granted });
-  } catch (error) {
-    emitLog("error", `Subscribe failed: ${topic}`, { reason: error.message });
-    const hint = isSystemTopic(topic)
-      ? "Check whether this system topic is subscribable with current device permissions."
-      : null;
-    res.status(500).json({ ok: false, message: error.message, topic, rawTopic, hint });
-  }
+  res.status(400).json({
+    ok: false,
+    message: "Subscription is disabled in Huawei API command mode."
+  });
 });
 
 app.post("/api/unsubscribe", async (req, res) => {
-  if (!ENABLE_LOCAL_MQTT) {
-    res.status(400).json({
-      ok: false,
-      message: "Local MQTT unsubscribe is disabled in openapi_command_only mode."
-    });
-    return;
-  }
-  if (!ensureConnected(res)) return;
-
-  const rawTopic = String(req.body?.topic || "").trim();
-  const topic = normalizeTopicInput(rawTopic);
-  if (!topic) {
-    res.status(400).json({ ok: false, message: "topic is required." });
-    return;
-  }
-
-  state.client.unsubscribe(topic, (error) => {
-    if (error) {
-      emitLog("error", `Unsubscribe failed: ${topic}`, { reason: error.message });
-      res.status(500).json({ ok: false, message: error.message });
-      return;
-    }
-    state.subscriptions.delete(topic);
-    emitStatus();
-    emitLog("info", `Unsubscribed: ${topic}`);
-    res.json({ ok: true, topic, rawTopic });
+  res.status(400).json({
+    ok: false,
+    message: "Unsubscribe is disabled in Huawei API command mode."
   });
 });
 
 app.post("/api/publish", async (req, res) => {
-  const rawTopic = String(req.body?.topic || "").trim();
-  const topic = normalizeTopicInput(rawTopic);
-  const qos = Number(req.body?.qos ?? 0);
-  const retain = Boolean(req.body?.retain);
-  if (!topic) {
-    res.status(400).json({ ok: false, message: "topic is required." });
-    return;
-  }
-
-  const payload = req.body?.payload;
-  const topicRoute = parseTopicRoute(topic);
-
-  try {
-    const cloudResult = await sendCloudCommandByTopic({ topic, payload, qos });
-    if (cloudResult) {
-      emitLog("info", `Cloud command dispatched: ${topic}`, {
-        route: cloudResult.route,
-        warnings: cloudResult.warnings || [],
-        targetStatus: cloudResult.targetStatus || null,
-        localSessionReleased: Boolean(cloudResult.localSessionReleased),
-        qos: cloudResult.qos ?? null,
-        targetOnlineWait: cloudResult.targetOnlineWait || null,
-        retryAttempts: cloudResult.retryAttempts || 1
-      });
-      io.emit("published", {
-        topic,
-        payload: JSON.stringify(cloudResult.normalizedPayload ?? payload ?? ""),
-        qos: Number.isFinite(qos) ? qos : 0,
-        retain,
-        route: cloudResult.route,
-        timestamp: nowIso()
-      });
-      res.json({
-        ok: true,
-        topic,
-        rawTopic,
-        route: cloudResult.route,
-        responseData: cloudResult.responseData || null,
-        normalizedPayload: cloudResult.normalizedPayload || null,
-        warnings: cloudResult.warnings || [],
-        targetStatus: cloudResult.targetStatus || null,
-        localSessionReleased: Boolean(cloudResult.localSessionReleased),
-        qos: cloudResult.qos ?? null,
-        targetOnlineWait: cloudResult.targetOnlineWait || null,
-        retryAttempts: cloudResult.retryAttempts || 1
-      });
-      return;
-    }
-  } catch (error) {
-    const canFallback =
-      ALLOW_CLOUD_ROUTE_MQTT_FALLBACK &&
-      topicRoute.type !== "property_set" &&
-      topicRoute.type !== "service_invoke" &&
-      state.client &&
-      state.connected;
-
-    if (!canFallback) {
-      const isStatusOffline = String(error.message || "").includes("Target device");
-      const isBrokerOffline = String(error.code || "") === "iot.messagebroker.OFFLINE";
-      const offlineHint =
-        isStatusOffline || isBrokerOffline
-          ? " Ensure physical device keeps MQTT session online. If this page used the same triplet, wait for device auto-reconnect and retry."
-          : "";
-      const reasonSuffix = isSystemTopic(topic)
-        ? " System topic command requires valid OpenAPI dispatch and will not fallback to raw MQTT."
-        : "";
-      emitLog("error", `Cloud command failed: ${topic}`, {
-        reason: error.message,
-        code: error.code || null,
-        requestId: error.requestId || null
-      });
-      res.status(400).json({ ok: false, message: `${error.message}${offlineHint}${reasonSuffix}` });
-      return;
-    }
-
-    emitLog("warn", "Cloud command failed. Falling back to MQTT raw publish.", {
-      topic,
-      reason: error.message
-    });
-  }
-
   if (!ensureConnected(res)) return;
 
-  const textPayload = normalizeMqttRawPayload(topic, payload);
+  const topic = String(req.body?.topic || "").trim();
+  const payload = req.body?.payload;
 
-  const rawRouteName = topicRoute.type === "mqtt_raw" ? "mqtt_raw" : "mqtt_raw_fallback";
+  try {
+    const result = await dispatchHuaweiCommand({ topic, payload });
 
-  state.client.publish(
-    topic,
-    textPayload,
-    { qos: Number.isFinite(qos) ? qos : 0, retain },
-    (error) => {
-      if (error) {
-        emitLog("error", `Publish failed: ${topic}`, { reason: error.message });
-        res.status(500).json({ ok: false, message: error.message });
-        return;
-      }
-      emitLog("info", `Published via MQTT raw route: ${topic}`, {
-        qos: Number.isFinite(qos) ? qos : 0,
-        retain,
-        route: rawRouteName
-      });
-      io.emit("published", {
-        topic,
-        payload: textPayload,
-        qos,
-        retain,
-        route: rawRouteName,
-        timestamp: nowIso()
-      });
-      res.json({ ok: true, topic, rawTopic, route: rawRouteName });
-    }
-  );
+    io.emit("published", {
+      topic: result.topic,
+      payload: JSON.stringify(result.normalizedPayload),
+      route: result.route,
+      timestamp: nowIso()
+    });
+
+    emitLog("info", `Command dispatched: ${result.normalizedPayload.command_name}`, {
+      topic: result.topic,
+      route: result.route,
+      retryAttempts: result.retryAttempts,
+      targetStatus: result.targetStatus
+    });
+
+    res.json({
+      ok: true,
+      message: "Command published.",
+      topic: result.topic,
+      route: result.route,
+      warnings: result.warnings,
+      normalizedPayload: result.normalizedPayload,
+      responseData: result.responseData,
+      targetStatus: result.targetStatus,
+      targetOnlineWait: result.targetOnlineWait,
+      retryAttempts: result.retryAttempts
+    });
+  } catch (error) {
+    const formatted = formatHuaweiError(error);
+    emitLog("error", `Cloud command failed: ${topic || "(default command route)"}`, {
+      reason: formatted.message,
+      code: formatted.code,
+      requestId: formatted.requestId
+    });
+
+    res.status(400).json({
+      ok: false,
+      message: formatted.message,
+      code: formatted.code,
+      requestId: formatted.requestId
+    });
+  }
 });
 
 io.on("connection", (socket) => {
   socket.emit("status", statusPayload());
   socket.emit("thing_model", {
-    trigger: "socket_init",
+    trigger: "init",
     properties: state.thingModel.properties,
     updatedAt: state.thingModel.updatedAt,
     lastError: state.thingModel.lastError,
     source: state.thingModel.source
   });
   socket.emit("property_state", {
-    trigger: "socket_init",
+    trigger: "init",
     properties: state.propertyState.properties,
     updatedAt: state.propertyState.updatedAt,
     lastError: state.propertyState.lastError,
     source: state.propertyState.source
   });
-  emitLog("info", `Web client connected: ${socket.id}`);
-
-  socket.on("disconnect", () => {
-    emitLog("info", `Web client disconnected: ${socket.id}`);
-  });
 });
 
-server.listen(PORT, async () => {
-  emitLog("info", `Web console running at http://localhost:${PORT}`);
-  emitLog("info", "Transport mode fixed to mqtt://<host>:1883 (non-TLS).");
+server.listen(PORT, () => {
+  emitLog("info", `Server started at http://0.0.0.0:${PORT}`);
 
-  if (AUTO_CONNECT_ON_START) {
-    const envConfig = {
-      productKey: ENV_TRIPLET.productKey,
-      deviceName: ENV_TRIPLET.deviceName,
-      deviceSecret: ENV_TRIPLET.deviceSecret,
-      regionId: process.env.ALIYUN_REGION_ID || DEFAULT_REGION,
-      clientId: process.env.ALIYUN_CLIENT_ID || null
-    };
-
-    if (envConfig.productKey && envConfig.deviceName && envConfig.deviceSecret) {
+  if (AUTO_CONNECT_ON_START && hasHuaweiDeviceConfig(ENV_DEFAULTS) && hasHuaweiCredentials(ENV_DEFAULTS)) {
+    setTimeout(async () => {
       try {
-        await connectClient(envConfig);
+        await connectClient({});
+        emitLog("info", "AUTO_CONNECT_ON_START succeeded.");
       } catch (error) {
-        emitLog("error", "Auto connect failed.", { reason: error.message });
+        state.lastError = error.message;
+        emitStatus();
+        emitLog("error", "AUTO_CONNECT_ON_START failed.", { reason: error.message });
       }
-    } else {
-      emitLog("warn", "AUTO_CONNECT_ON_START=true but env triplet is incomplete.");
-    }
+    }, 600);
   }
 });
-

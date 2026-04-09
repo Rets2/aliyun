@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/aliyun-iot-web}"
-APP_NAME="${APP_NAME:-aliyun-iot-web}"
+APP_DIR="${APP_DIR:-/opt/huawei-iotda-web}"
+APP_NAME="${APP_NAME:-huawei-iotda-web}"
 TARGET_COMMIT="${1:-}"
 
 if [[ -z "${TARGET_COMMIT}" ]]; then

@@ -31,6 +31,10 @@ const PROPERTY_POLL_ON_CONNECT =
 const PROPERTY_POLL_INTERVAL_MS = Math.max(2000, Number(process.env.PROPERTY_POLL_INTERVAL_MS || 2000));
 const AUTO_CONNECT_ON_START =
   String(process.env.AUTO_CONNECT_ON_START || "false").toLowerCase() === "true";
+const DEFAULT_USE_DERIVED_PREDICATE =
+  String(process.env.HWCLOUD_USE_DERIVED_PREDICATE || process.env.HUAWEI_IOT_USE_DERIVED_PREDICATE || "true")
+    .toLowerCase()
+    .trim() !== "false";
 
 const ENV_DEFAULTS = {
   regionId: pickFirstNonEmpty(process.env.HWCLOUD_REGION_ID, process.env.HUAWEI_IOT_REGION_ID, DEFAULT_REGION),
@@ -42,7 +46,8 @@ const ENV_DEFAULTS = {
   productId: pickFirstNonEmpty(process.env.HWCLOUD_PRODUCT_ID, process.env.HUAWEI_IOT_PRODUCT_ID),
   serviceId: pickFirstNonEmpty(process.env.HWCLOUD_SERVICE_ID, process.env.HUAWEI_IOT_SERVICE_ID, DEFAULT_SERVICE_ID),
   instanceId: pickFirstNonEmpty(process.env.HWCLOUD_INSTANCE_ID, process.env.HUAWEI_IOT_INSTANCE_ID) || null,
-  appId: pickFirstNonEmpty(process.env.HWCLOUD_APP_ID, process.env.HUAWEI_IOT_APP_ID) || null
+  appId: pickFirstNonEmpty(process.env.HWCLOUD_APP_ID, process.env.HUAWEI_IOT_APP_ID) || null,
+  useDerivedPredicate: DEFAULT_USE_DERIVED_PREDICATE
 };
 
 const state = {
@@ -91,6 +96,15 @@ function pickFirstNonEmpty(...values) {
   return "";
 }
 
+function parseBooleanOrFallback(value, fallback) {
+  if (value === undefined || value === null) return fallback;
+  const text = String(value).trim().toLowerCase();
+  if (!text) return fallback;
+  if (["true", "1", "yes", "y", "on"].includes(text)) return true;
+  if (["false", "0", "no", "n", "off"].includes(text)) return false;
+  return fallback;
+}
+
 function readField(source, ...keys) {
   if (!source || typeof source !== "object") return undefined;
   for (const key of keys) {
@@ -126,7 +140,8 @@ function redactConfig(config) {
     productKey: config.productId,
     deviceName: config.deviceId,
     clientId: null,
-    transport: "openapi_command_only"
+    transport: "openapi_command_only",
+    useDerivedPredicate: config.useDerivedPredicate !== false
   };
 }
 
@@ -207,7 +222,8 @@ function buildRuntimeConfig(configInput = {}) {
     productId: pickFirstNonEmpty(configInput.productId, ENV_DEFAULTS.productId),
     serviceId: pickFirstNonEmpty(configInput.serviceId, ENV_DEFAULTS.serviceId, DEFAULT_SERVICE_ID),
     instanceId: pickFirstNonEmpty(configInput.instanceId, ENV_DEFAULTS.instanceId) || null,
-    appId: pickFirstNonEmpty(configInput.appId, ENV_DEFAULTS.appId) || null
+    appId: pickFirstNonEmpty(configInput.appId, ENV_DEFAULTS.appId) || null,
+    useDerivedPredicate: parseBooleanOrFallback(configInput.useDerivedPredicate, ENV_DEFAULTS.useDerivedPredicate)
   };
 }
 
@@ -237,6 +253,9 @@ function formatHuaweiError(error) {
     message = "ProjectId 不匹配或区域错误，请检查 HWCLOUD_PROJECT_ID 与 HWCLOUD_REGION_ID。";
   } else if (merged.includes("signature") || merged.includes("ak") || merged.includes("sk")) {
     message = "AK/SK 鉴权失败，请检查 HWCLOUD_AK 与 HWCLOUD_SK。";
+  } else if (merged.includes("authentication failed")) {
+    message =
+      "Authentication failed：请检查 AK/SK 与 ProjectId 是否同一 IAM 用户与项目；标准/企业版 IoTDA 需启用 derived 签名。";
   } else if (merged.includes("device") && merged.includes("offline")) {
     message = "目标设备离线，命令未成功下发。";
   }
@@ -254,15 +273,20 @@ function getIoTdaClient(config = state.config) {
     throw new Error("Config missing. Connect first.");
   }
 
-  const cacheKey = `${config.regionId}|${config.endpoint || ""}|${config.projectId}|${config.ak}|${config.sk}`;
+  const cacheKey = `${config.regionId}|${config.endpoint || ""}|${config.projectId}|${config.ak}|${config.sk}|${
+    config.useDerivedPredicate ? "derived" : "legacy"
+  }`;
   if (cachedIotdaClient && cacheKey === cachedClientKey) {
     return cachedIotdaClient;
   }
 
-  const credentials = new BasicCredentials()
+  let credentials = new BasicCredentials()
     .withAk(config.ak)
     .withSk(config.sk)
     .withProjectId(config.projectId);
+  if (config.useDerivedPredicate) {
+    credentials = credentials.withDerivedPredicate(BasicCredentials.getDefaultDerivedPredicate());
+  }
 
   const builder = IotdaV5.IoTDAClient.newBuilder().withCredential(credentials);
   if (config.endpoint) {
@@ -738,7 +762,8 @@ async function connectClient(configInput) {
     endpoint: config.endpoint || null,
     deviceId: config.deviceId,
     productId: config.productId,
-    serviceId: config.serviceId
+    serviceId: config.serviceId,
+    useDerivedPredicate: config.useDerivedPredicate !== false
   });
 
   try {
@@ -1015,6 +1040,7 @@ app.get("/api/status", (req, res) => {
       cloudDispatchRetryIntervalMs: CLOUD_DISPATCH_RETRY_INTERVAL_MS,
       propertyPollOnConnect: PROPERTY_POLL_ON_CONNECT,
       propertyPollIntervalMs: PROPERTY_POLL_INTERVAL_MS,
+      useDerivedPredicate: DEFAULT_USE_DERIVED_PREDICATE,
       provider: "huawei_iotda"
     }
   });

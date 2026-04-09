@@ -285,7 +285,9 @@ function getIoTdaClient(config = state.config) {
     .withSk(config.sk)
     .withProjectId(config.projectId);
   if (config.useDerivedPredicate) {
-    credentials = credentials.withDerivedPredicate(BasicCredentials.getDefaultDerivedPredicate());
+    credentials = credentials
+      .withRegionId(config.regionId)
+      .withDerivedPredicate((request) => BasicCredentials.getDefaultDerivedPredicate.call(BasicCredentials, request));
   }
 
   const builder = IotdaV5.IoTDAClient.newBuilder().withCredential(credentials);
